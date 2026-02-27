@@ -1,0 +1,355 @@
+# =============================================================================
+# ASR Pipeline Configuration
+# =============================================================================
+# This file defines all configurable parameters for the multilingual ASR
+# pipeline. Override any value via CLI flags or environment variables
+# prefixed with ASR_PIPELINE_ (e.g., ASR_PIPELINE_DEVICE=cpu).
+# =============================================================================
+
+# ---------------------------------------------------------------------------
+# Pipeline-level settings
+# ---------------------------------------------------------------------------
+pipeline:
+  device: "cuda"                    # "cuda" or "cpu"
+  compute_type: "int8_float16"       # "int8_float16" (GPU), "float16", "int8" (CPU), "float32"
+  batch_size: 8                     # Batch size for ASR inference
+  num_workers: 4                    # DataLoader workers for preprocessing
+  output_dir: "./outputs"           # Default output directory
+
+# ---------------------------------------------------------------------------
+# Audio preprocessing
+# ---------------------------------------------------------------------------
+preprocessing:
+  target_sample_rate: 16000         # All models expect 16kHz
+  mono: true                        # Convert to mono
+  loudness_normalization:
+    enabled: true
+    target_lufs: -23.0              # EBU R128 standard
+  vad:
+    enabled: true
+    threshold: 0.5                  # Silero VAD speech probability threshold
+    min_speech_duration_ms: 250     # Minimum speech segment duration
+    min_silence_duration_ms: 100    # Minimum silence between speech segments
+  chunking:
+    max_duration_s: 30              # Maximum chunk duration in seconds
+    overlap_s: 2                    # Overlap between chunks for continuity
+  noise_reduction:
+    enabled: true
+    method: "spectral_gating"       # "spectral_gating" or "none"
+    prop_decrease: 0.75             # Noise reduction strength (0.0-1.0)
+
+# ---------------------------------------------------------------------------
+# Language registry
+# ---------------------------------------------------------------------------
+# Two tiers only:
+#   - high: Routed to Whisper (reliable, high-resource languages)
+#   - non_high: Routed to Omnilingual ASR (everything else)
+#
+# To add a new language, add an entry below. New languages are always non_high.
+# ---------------------------------------------------------------------------
+languages:
+  # ---- HIGH RESOURCE (Whisper is reliably accurate) ----
+  eng:
+    name: "English"
+    tier: "high"
+    bcp47: "en"
+    script: "Latn"
+    nllb_code: "eng_Latn"
+  spa:
+    name: "Spanish"
+    tier: "high"
+    bcp47: "es"
+    script: "Latn"
+    nllb_code: "spa_Latn"
+  fra:
+    name: "French"
+    tier: "high"
+    bcp47: "fr"
+    script: "Latn"
+    nllb_code: "fra_Latn"
+  deu:
+    name: "German"
+    tier: "high"
+    bcp47: "de"
+    script: "Latn"
+    nllb_code: "deu_Latn"
+  por:
+    name: "Portuguese"
+    tier: "high"
+    bcp47: "pt"
+    script: "Latn"
+    nllb_code: "por_Latn"
+  rus:
+    name: "Russian"
+    tier: "high"
+    bcp47: "ru"
+    script: "Cyrl"
+    nllb_code: "rus_Cyrl"
+  zho:
+    name: "Chinese"
+    tier: "high"
+    bcp47: "zh"
+    script: "Hans"
+    nllb_code: "zho_Hans"
+  jpn:
+    name: "Japanese"
+    tier: "high"
+    bcp47: "ja"
+    script: "Jpan"
+    nllb_code: "jpn_Jpan"
+  kor:
+    name: "Korean"
+    tier: "high"
+    bcp47: "ko"
+    script: "Kore"
+    nllb_code: "kor_Hang"
+  ita:
+    name: "Italian"
+    tier: "high"
+    bcp47: "it"
+    script: "Latn"
+    nllb_code: "ita_Latn"
+  nld:
+    name: "Dutch"
+    tier: "high"
+    bcp47: "nl"
+    script: "Latn"
+    nllb_code: "nld_Latn"
+  pol:
+    name: "Polish"
+    tier: "high"
+    bcp47: "pl"
+    script: "Latn"
+    nllb_code: "pol_Latn"
+  tur:
+    name: "Turkish"
+    tier: "high"
+    bcp47: "tr"
+    script: "Latn"
+    nllb_code: "tur_Latn"
+  ces:
+    name: "Czech"
+    tier: "high"
+    bcp47: "cs"
+    script: "Latn"
+    nllb_code: "ces_Latn"
+  swe:
+    name: "Swedish"
+    tier: "high"
+    bcp47: "sv"
+    script: "Latn"
+    nllb_code: "swe_Latn"
+  ukr:
+    name: "Ukrainian"
+    tier: "high"
+    bcp47: "uk"
+    script: "Cyrl"
+    nllb_code: "ukr_Cyrl"
+  ron:
+    name: "Romanian"
+    tier: "high"
+    bcp47: "ro"
+    script: "Latn"
+    nllb_code: "ron_Latn"
+  ara:
+    name: "Arabic"
+    tier: "high"
+    bcp47: "ar"
+    script: "Arab"
+    nllb_code: "arb_Arab"
+
+  # ---- NON-HIGH RESOURCE (Omnilingual ASR) ----
+  hin:
+    name: "Hindi"
+    tier: "non_high"
+    bcp47: "hi"
+    script: "Deva"
+    nllb_code: "hin_Deva"
+  ben:
+    name: "Bengali"
+    tier: "non_high"
+    bcp47: "bn"
+    script: "Beng"
+    nllb_code: "ben_Beng"
+  nep:
+    name: "Nepali"
+    tier: "non_high"
+    bcp47: "ne"
+    script: "Deva"
+    nllb_code: "npi_Deva"
+  swa:
+    name: "Swahili"
+    tier: "non_high"
+    bcp47: "sw"
+    script: "Latn"
+    nllb_code: "swh_Latn"
+  amh:
+    name: "Amharic"
+    tier: "non_high"
+    bcp47: "am"
+    script: "Ethi"
+    nllb_code: "amh_Ethi"
+  orm:
+    name: "Afaan Oromo"
+    tier: "non_high"
+    bcp47: "om"
+    script: "Latn"
+    nllb_code: "gaz_Latn"
+  hau:
+    name: "Hausa"
+    tier: "non_high"
+    bcp47: "ha"
+    script: "Latn"
+    nllb_code: "hau_Latn"
+  yor:
+    name: "Yoruba"
+    tier: "non_high"
+    bcp47: "yo"
+    script: "Latn"
+    nllb_code: "yor_Latn"
+  ibo:
+    name: "Igbo"
+    tier: "non_high"
+    bcp47: "ig"
+    script: "Latn"
+    nllb_code: "ibo_Latn"
+  tgl:
+    name: "Tagalog"
+    tier: "non_high"
+    bcp47: "tl"
+    script: "Latn"
+    nllb_code: "tgl_Latn"
+  mya:
+    name: "Burmese"
+    tier: "non_high"
+    bcp47: "my"
+    script: "Mymr"
+    nllb_code: "mya_Mymr"
+  khm:
+    name: "Khmer"
+    tier: "non_high"
+    bcp47: "km"
+    script: "Khmr"
+    nllb_code: "khm_Khmr"
+  kin:
+    name: "Kinyarwanda"
+    tier: "non_high"
+    bcp47: "rw"
+    script: "Latn"
+    nllb_code: "kin_Latn"
+  som:
+    name: "Somali"
+    tier: "non_high"
+    bcp47: "so"
+    script: "Latn"
+    nllb_code: "som_Latn"
+  tir:
+    name: "Tigrinya"
+    tier: "non_high"
+    bcp47: "ti"
+    script: "Ethi"
+    nllb_code: "tir_Ethi"
+
+# ---------------------------------------------------------------------------
+# ASR engines
+# ---------------------------------------------------------------------------
+whisper:
+  model_size: "large-v3"            # Whisper model variant
+  beam_size: 5                      # Beam search width
+  best_of: 5                        # Number of candidates
+  patience: 1.0                     # Beam search patience
+  condition_on_previous_text: true  # Use previous text as context
+  vad_filter: true                  # Apply VAD filter within Whisper
+  word_timestamps: true             # Enable word-level timestamps
+  batch_inference: true             # Use BatchedInferencePipeline for faster GPU transcription
+  batch_size: 8                     # Number of chunks processed in parallel (lower if OOM)
+
+omnilingual:
+  model_card: "omniASR_CTC_300M_v2"     # Default: fits 16GB GPU
+  # model_card: "omniASR_CTC_1B_v2"     # Better accuracy, needs 24GB
+  # model_card: "omniASR_LLM_300M_v2"   # LLM variant for zero-shot
+  zero_shot_model_card: "omniASR_LLM_300M_v2"  # For zero-shot new languages
+  max_audio_length_s: 40            # Omnilingual limit per chunk
+
+# ---------------------------------------------------------------------------
+# Speaker diarization
+# ---------------------------------------------------------------------------
+diarization:
+  backend: "pyannote"               # "pyannote" or "nemo_msdd"
+  model: "pyannote/speaker-diarization-3.1"  # Only for pyannote backend
+  auth_token: null                  # HuggingFace token (required for pyannote)
+  min_speakers: null                # null = auto-detect
+  max_speakers: null                # null = auto-detect
+  min_segment_duration: 0.5         # Minimum segment duration in seconds
+  nemo:                             # Only used when backend: "nemo_msdd"
+    use_msdd: false                 # true = NeuralDiarizer (slower, overlap-aware)
+    speaker_embeddings_model: "titanet_large"
+    clustering_method: "agglomerative"
+    max_rp_threshold: 0.25          # Clustering distance threshold
+    sparse_search_volume: 30
+
+# ---------------------------------------------------------------------------
+# Forced alignment (wav2vec2 MMS)
+# ---------------------------------------------------------------------------
+alignment:
+  enabled: true                     # Refine word timestamps via MMS forced alignment
+
+# ---------------------------------------------------------------------------
+# Post-processing
+# ---------------------------------------------------------------------------
+postprocessing:
+  translation_backend: "translategemma"  # "translategemma" (default) or "ct2_nllb" (legacy)
+
+  # TranslateGemma 4B — single model for translation + English cleanup
+  # Auto-downloads from HuggingFace on first run (~3 GB).
+  # Handles all languages (55 supported) including English→English cleanup.
+  translategemma:
+    model_id: "google/translategemma-4b-it"
+    batch_size: 8                   # GPU batch size for HF pipeline
+    max_new_tokens: 256             # Max tokens per translated segment
+    quantize: "4bit"                # "4bit", "8bit", or null (full precision). Requires bitsandbytes.
+
+  # ── Below configs only used with translation_backend: "ct2_nllb" ──
+
+  # Ollama LLM for joint refinement (ct2_nllb backend only)
+  correction:
+    enabled: true
+    model: "qwen2.5:1.5b"
+    base_url: "http://localhost:11434"
+    temperature: 0.1
+    max_tokens: 2048
+    conservative_for_non_high: true
+
+  # CTranslate2 NLLB translation (ct2_nllb backend, or fallback for unsupported langs)
+  translation:
+    enabled: false                  # Disabled by default (TranslateGemma handles translation)
+    model_path: null                # Set via: asr-pipeline setup --translation-backend ct2_nllb
+    tokenizer_name: "facebook/nllb-200-distilled-1.3B"
+    target_language: "eng_Latn"
+    max_length: 512
+    beam_size: 4
+
+  # Joint refinement (ct2_nllb backend only)
+  refinement:
+    enabled: true
+    temperature: 0.2
+    max_tokens: 2048
+
+# ---------------------------------------------------------------------------
+# Output formatting
+# ---------------------------------------------------------------------------
+output:
+  format: "txt"                     # "txt", "json", "srt", or "all"
+  transcription_style: "intelligent_verbatim"  # "verbatim" or "intelligent_verbatim"
+  include_raw_text: true            # Include pre-correction text
+  include_translation: true         # Include English translation
+  timestamp_format: "HH:MM:SS"     # "HH:MM:SS" or "HH:MM:SS.mmm"
+
+# ---------------------------------------------------------------------------
+# Logging
+# ---------------------------------------------------------------------------
+logging:
+  level: "INFO"                     # DEBUG, INFO, WARNING, ERROR
+  file: null                        # null = stdout only; path = also log to file
+  format: "rich"                    # "rich" (console) or "plain" (file-friendly)
+  show_progress: true               # Show progress bars
