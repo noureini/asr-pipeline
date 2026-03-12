@@ -299,15 +299,41 @@ def transcribe_folder(
     )
     console.print()
 
+    # Filter out already-completed interviews (resume support)
+    skipped = 0
+    remaining: dict[str, list] = {}
+    for interview_key, files in sorted(interviews.items()):
+        interview_output_dir = output_dir / interview_key
+        if interview_output_dir.exists() and any(interview_output_dir.iterdir()):
+            skipped += 1
+            continue
+        remaining[interview_key] = files
+
+    if skipped:
+        console.print(
+            f"  [dim]Skipping {skipped} already-completed interview(s)[/dim]"
+        )
+
+    if not remaining:
+        console.print("[green]All interviews already processed![/green]")
+        return
+
+    remaining_files = sum(len(files) for files in remaining.values())
+    console.print(
+        f"  Processing [bold]{len(remaining)}[/bold] remaining interview(s), "
+        f"[bold]{remaining_files}[/bold] audio file(s)"
+    )
+    console.print()
+
     # Create pipeline (models loaded once, reused across all files)
     pipeline = ASRPipeline(cfg)
     batch_start = time.perf_counter()
 
     for interview_idx, (interview_key, files) in enumerate(
-        sorted(interviews.items()), start=1
+        sorted(remaining.items()), start=1
     ):
         console.print(
-            f"[bold]Interview {interview_idx}/{len(interviews)}: "
+            f"[bold]Interview {interview_idx}/{len(remaining)}: "
             f"{interview_key}[/bold] ({len(files)} file(s))"
         )
 
@@ -364,8 +390,9 @@ def transcribe_folder(
     batch_elapsed = time.perf_counter() - batch_start
     console.print(
         f"[green]Batch complete![/green] "
-        f"{len(interviews)} interview(s) processed in "
+        f"{len(remaining)} interview(s) processed in "
         f"{batch_elapsed:.1f}s"
+        f"{f' ({skipped} skipped)' if skipped else ''}"
     )
     console.print(f"  Output: [bold]{output_dir}[/bold]")
 
