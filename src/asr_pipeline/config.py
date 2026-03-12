@@ -36,6 +36,7 @@ class PipelineConfig(BaseModel):
     batch_size: int = 8
     num_workers: int = 4
     output_dir: str = "./outputs"
+    low_vram: bool = False  # Sequential execution: load/unload one model at a time
 
 
 class LoudnessConfig(BaseModel):

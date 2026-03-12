@@ -197,10 +197,14 @@ class ForcedAligner:
             # Update segment with refined word timestamps
             seg.words = words
 
-            # Optionally tighten segment boundaries to match first/last word
+            # Tighten start to first word but preserve original end_s.
+            # Word-level end_s marks the last character's frame, which is
+            # tighter than the actual acoustic boundary. Keep the original
+            # segment end (from VAD/chunking) as it's more accurate, but
+            # ensure it's not earlier than the last word's end.
             if words:
                 seg.start_s = words[0].start_s
-                seg.end_s = words[-1].end_s
+                seg.end_s = max(seg.end_s, words[-1].end_s)
 
             return True
 

@@ -92,6 +92,7 @@ class ASRPipeline:
         project_name: str = "",
         min_speakers: Optional[int] = None,
         max_speakers: Optional[int] = None,
+        write_output: bool = True,
     ) -> TranscriptResult:
         """
         Run the full transcription pipeline on an audio file.
@@ -103,6 +104,8 @@ class ASRPipeline:
             project_name: Optional project name for the header.
             min_speakers: Override minimum speaker count.
             max_speakers: Override maximum speaker count.
+            write_output: Whether to write output files. Set to False
+                for batch mode where output is written after merging.
 
         Returns:
             TranscriptResult with all segments and metadata.
@@ -177,15 +180,17 @@ class ASRPipeline:
                         diarization_result.num_speakers, project_name,
                         non_speech_regions,
                     )
-                    written_files = write_transcript(
-                        result,
-                        output_dir,
-                        audio_path.stem,
-                        output_format=self._config.output.format,
-                        timestamp_fmt=self._config.output.timestamp_format,
-                        include_raw=self._config.output.include_raw_text,
-                        include_translation=self._config.output.include_translation,
-                    )
+                    written_files: list[Path] = []
+                    if write_output:
+                        written_files = write_transcript(
+                            result,
+                            output_dir,
+                            audio_path.stem,
+                            output_format=self._config.output.format,
+                            timestamp_fmt=self._config.output.timestamp_format,
+                            include_raw=self._config.output.include_raw_text,
+                            include_translation=self._config.output.include_translation,
+                        )
 
             finally:
                 self._cleanup()
@@ -356,12 +361,13 @@ class ASRPipeline:
         all_segments: list[ASRSegment] = []
 
         if engine_name == "whisper":
-            self._whisper = WhisperEngine(
-                self._config.whisper,
-                device=self._config.pipeline.device,
-                compute_type=self._config.pipeline.compute_type,
-            )
-            self._whisper.load()
+            if self._whisper is None or not self._whisper.is_loaded:
+                self._whisper = WhisperEngine(
+                    self._config.whisper,
+                    device=self._config.pipeline.device,
+                    compute_type=self._config.pipeline.compute_type,
+                )
+                self._whisper.load()
 
             if self._config.whisper.batch_inference and wav_path is not None:
                 # Batched: feed full WAV to BatchedInferencePipeline
@@ -401,11 +407,17 @@ class ASRPipeline:
                         progress.advance(task)
 
         else:  # omnilingual
-            self._omnilingual = OmnilingualEngine(
-                self._config.omnilingual,
-                device=self._config.pipeline.device,
-            )
-            self._omnilingual.load()
+            if self._omnilingual is None:
+                self._omnilingual = OmnilingualEngine(
+                    self._config.omnilingual,
+                    device=self._config.pipeline.device,
+                )
+                self._omnilingual.load()
+            elif self._omnilingual.is_loaded:
+                # Model exists but may be offloaded to CPU — reload to GPU
+                self._omnilingual.reload_to_gpu()
+            else:
+                self._omnilingual.load()
 
             logger.info(
                 f"  Transcribing {len(chunks)} chunks with Omnilingual ASR"
@@ -635,6 +647,7 @@ class ASRPipeline:
 
         Whisper large-v3 alone uses ~3-4 GB VRAM. Freeing it before loading
         CTranslate2 NLLB prevents CUDA OOM errors during translation.
+        On small GPUs (e.g., 6 GB), aggressive cleanup is essential.
         """
         import gc
 
@@ -642,8 +655,9 @@ class ASRPipeline:
             self._whisper.unload()
             self._whisper = None
         if self._omnilingual is not None:
-            self._omnilingual.unload()
-            self._omnilingual = None
+            # Offload to CPU instead of destroying — avoids fairseq2
+            # thread-local gang context corruption on reload.
+            self._omnilingual.offload_to_cpu()
         if self._diarizer is not None:
             self._diarizer.unload()
             self._diarizer = None
@@ -651,11 +665,14 @@ class ASRPipeline:
             self._aligner.unload()
             self._aligner = None
 
+        # Aggressive cleanup: multiple gc passes + CUDA cache clear
+        gc.collect()
         gc.collect()
         try:
             import torch
             if torch.cuda.is_available():
                 torch.cuda.empty_cache()
+                torch.cuda.synchronize()
         except ImportError:
             pass
 
@@ -666,15 +683,31 @@ class ASRPipeline:
     # ─────────────────────────────────────────────────────────────────
 
     def _cleanup(self) -> None:
-        """Release all models from memory."""
-        if self._whisper is not None:
-            self._whisper.unload()
-        if self._omnilingual is not None:
-            self._omnilingual.unload()
+        """Release post-processing models from memory.
+
+        ASR and diarization models are kept loaded between batch files
+        to avoid fairseq2 thread-local gang context corruption. They
+        are freed explicitly by _free_gpu_for_postprocessing() within
+        each file's pipeline run.
+        """
         if self._diarizer is not None:
             self._diarizer.unload()
+            self._diarizer = None
         if self._aligner is not None:
             self._aligner.unload()
+            self._aligner = None
         if self._postprocessor is not None:
             self._postprocessor.unload()
+            self._postprocessor = None
+        logger.debug("Post-processing models unloaded from memory")
+
+    def cleanup_all(self) -> None:
+        """Release ALL models from memory (call at end of batch)."""
+        self._cleanup()
+        if self._whisper is not None:
+            self._whisper.unload()
+            self._whisper = None
+        if self._omnilingual is not None:
+            self._omnilingual.unload()
+            self._omnilingual = None
         logger.debug("All models unloaded from memory")

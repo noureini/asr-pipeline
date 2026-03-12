@@ -111,6 +111,14 @@ def format_txt(
     lines.append(sep)
     lines.append("TRANSCRIPT")
     lines.append(sep)
+
+    # Interview metadata (batch mode)
+    if meta.interview:
+        iv = meta.interview
+        lines.append(f"Interview:      {iv.interview_key}")
+        lines.append(f"Time Range:     {iv.recording_start} — {iv.recording_end}")
+        lines.append(f"Source Files:   {len(iv.source_files)}")
+
     lines.append(f"Project:        {meta.project_name or 'N/A'}")
     lines.append(f"Date:           {meta.recording_date or datetime.now().strftime('%Y-%m-%d')}")
     lines.append(f"Duration:       {format_timestamp(meta.duration_s)}")
@@ -157,11 +165,18 @@ def format_txt(
             ns = entry  # type: NonSpeechSegment
             duration = ns.duration_s if ns.duration_s > 0 else (ns.end_s - ns.start_s)
             label = ns.region_type.upper().replace("_", "-")
-            lines.append(f"        [{label} \u2014 {duration:.1f}s]")
+            if ns.absolute_start:
+                lines.append(f"        [{ns.absolute_start}] [{label} \u2014 {duration:.1f}s]")
+            else:
+                lines.append(f"        [{label} \u2014 {duration:.1f}s]")
             lines.append("")
         else:
             seg = entry  # type: ProcessedSegment
-            ts = format_timestamp(seg.start_s, timestamp_fmt)
+            # Use absolute timestamp if available, otherwise relative
+            if seg.absolute_start:
+                ts = seg.absolute_start
+            else:
+                ts = format_timestamp(seg.start_s, timestamp_fmt)
             lang_tag = get_lang_tag(seg.language)
 
             # Timestamp and speaker

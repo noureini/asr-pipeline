@@ -150,6 +150,9 @@ class NonSpeechSegment(BaseModel):
     end_s: float
     region_type: str = "non_speech"  # "silence", "non_speech", "inaudible"
     duration_s: float = 0.0
+    source_file: Optional[str] = None
+    absolute_start: Optional[str] = None  # ISO 8601 datetime
+    absolute_end: Optional[str] = None  # ISO 8601 datetime
 
 
 class AudioQualityMetrics(BaseModel):
@@ -196,6 +199,34 @@ class ProcessedSegment(BaseModel):
     english_translation: str
     refined_translation: str
     confidence: float = 0.0
+    source_file: Optional[str] = None
+    absolute_start: Optional[str] = None  # ISO 8601 datetime
+    absolute_end: Optional[str] = None  # ISO 8601 datetime
+
+
+# =============================================================================
+# Batch / interview models
+# =============================================================================
+
+
+class AudioFileInfo(BaseModel):
+    """Metadata for a single audio file within an interview."""
+
+    filename: str
+    recording_start: str  # ISO 8601 datetime
+    duration_s: float = 0.0
+    file_path: str = ""
+
+
+class InterviewMetadata(BaseModel):
+    """Metadata for a consolidated interview transcript."""
+
+    interview_key: str
+    interview_id: Optional[str] = None  # UUID from filenames
+    source_files: list[AudioFileInfo] = Field(default_factory=list)
+    total_duration_s: float = 0.0
+    recording_start: str = ""  # ISO 8601, earliest file
+    recording_end: str = ""  # ISO 8601, latest file end
 
 
 # =============================================================================
@@ -216,6 +247,7 @@ class TranscriptMetadata(BaseModel):
     asr_engines_used: list[str]
     postprocessing_stages: list[str]
     audio_quality: Optional[AudioQualityMetrics] = None
+    interview: Optional[InterviewMetadata] = None
 
 
 class TranscriptResult(BaseModel):
