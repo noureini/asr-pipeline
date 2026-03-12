@@ -15,6 +15,7 @@ pipeline:
   batch_size: 8                     # Batch size for ASR inference
   num_workers: 4                    # DataLoader workers for preprocessing
   output_dir: "./outputs"           # Default output directory
+  low_vram: false                   # Sequential mode: one model at a time (~3 GB peak VRAM)
 
 # ---------------------------------------------------------------------------
 # Audio preprocessing
