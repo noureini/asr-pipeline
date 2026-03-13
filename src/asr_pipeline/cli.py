@@ -433,6 +433,12 @@ def transcribe_folder(
     show_default=True,
     help="Baseline Omnilingual model card (always included).",
 )
+@click.option(
+    "--translate", "-t",
+    is_flag=True,
+    default=False,
+    help="Also translate transcripts to English (via TranslateGemma).",
+)
 def benchmark(
     audio: Path,
     language: str,
@@ -440,6 +446,7 @@ def benchmark(
     device: Optional[str],
     save: Optional[Path],
     baseline: str,
+    translate: bool,
 ) -> None:
     """
     Benchmark ASR models side-by-side on the same audio.
@@ -454,12 +461,14 @@ def benchmark(
     Examples:
         asr-pipeline benchmark audio.m4a -l ben -m omniASR_LLM_300M_v2
         asr-pipeline benchmark audio.m4a -l ben -m omniASR_LLM_300M_v2 -m bangla-speech-processing/BanglaASR
+        asr-pipeline benchmark audio.m4a -l ben -m omniASR_LLM_300M_v2 --translate
         asr-pipeline benchmark ./folder/ -l ben -m omniASR_LLM_300M_v2 --save results.json
     """
     from asr_pipeline.benchmark import (
         benchmark_models,
         collect_audio_files,
         display_results,
+        translate_results,
     )
     from asr_pipeline.config import load_config
     from asr_pipeline.logging_config import console
@@ -503,6 +512,11 @@ def benchmark(
         device=device,
         baseline_model=baseline,
     )
+
+    if translate:
+        console.print("[bold]Translating transcripts...[/bold]")
+        console.print()
+        translate_results(report, language=language, device=device)
 
     display_results(report)
 
