@@ -467,9 +467,10 @@ def translate_results(
     device: str = "cuda",
 ) -> None:
     """
-    Translate all benchmark transcripts using the pipeline's CT2 NLLB translator.
+    Translate all benchmark transcripts to English using HF NLLB-200.
 
-    Modifies results in-place, adding translation and timing.
+    Uses the transformers pipeline directly — no CTranslate2 conversion
+    or gated model access needed. Just downloads from HuggingFace.
 
     Args:
         report: BenchmarkReport with transcripts to translate.
@@ -478,9 +479,6 @@ def translate_results(
     """
     import torch
 
-    from asr_pipeline.config import load_config
-    from asr_pipeline.postprocessor import CTranslate2Translator
-
     # Skip if language is English
     if language in ("eng", "en"):
         for r in report.results:
@@ -488,46 +486,58 @@ def translate_results(
         return
 
     # Get NLLB source language code from pipeline config
+    from asr_pipeline.config import load_config
+
     cfg = load_config()
     lang_cfg = cfg.languages.get(language)
-    if lang_cfg:
-        nllb_code = lang_cfg.nllb_code
-    else:
-        # Fallback: guess {iso3}_{Script}
-        nllb_code = f"{language}_Latn"
-        logger.warning(
-            "Language %s not in config, guessing NLLB code: %s",
-            language, nllb_code,
-        )
+    nllb_code = lang_cfg.nllb_code if lang_cfg else f"{language}_Latn"
 
-    # Load CT2 NLLB translator — use config path or default ~/.asr-pipeline/models/ct2-nllb
-    ct2_path = cfg.postprocessing.translation.model_path
-    if not ct2_path:
-        ct2_path = str(Path.home() / ".asr-pipeline" / "models" / "ct2-nllb")
-    translator = CTranslate2Translator(
-        model_path=ct2_path,
-        target_language="eng_Latn",
-        device=device,
-    )
-
-    if not translator.load():
-        logger.error("Failed to load CT2 NLLB translator — skipping translation")
-        return
+    logger.info("Loading NLLB-200 for translation (%s → eng_Latn)", nllb_code)
 
     try:
-        # Translate each result individually so we get per-model timing
+        import transformers
+
+        device_idx = 0 if device == "cuda" and torch.cuda.is_available() else -1
+        torch_dtype = torch.float16 if device_idx >= 0 else torch.float32
+
+        model_name = "facebook/nllb-200-distilled-600M"
+        tokenizer = transformers.AutoTokenizer.from_pretrained(model_name)
+        model = transformers.AutoModelForSeq2SeqLM.from_pretrained(
+            model_name, torch_dtype=torch_dtype
+        )
+        if device_idx >= 0:
+            model = model.to("cuda")
+
+        pipe = transformers.pipeline(
+            "translation",
+            model=model,
+            tokenizer=tokenizer,
+            src_lang=nllb_code,
+            tgt_lang="eng_Latn",
+            device=device_idx,
+            max_length=512,
+        )
+
         for r in report.results:
             if r.error or not r.transcript.strip():
                 continue
             t0 = time.perf_counter()
-            translations = translator.translate_batch(
-                [r.transcript],
-                source_language=nllb_code,
-            )
+            # Split long text into sentences (using Bengali danda "।")
+            sentences = [s.strip() for s in r.transcript.split("।") if s.strip()]
+            if not sentences:
+                sentences = [r.transcript]
+            translated_parts = []
+            for sent in sentences:
+                out = pipe(sent)
+                translated_parts.append(out[0]["translation_text"])
             r.translation_elapsed_s = time.perf_counter() - t0
-            r.translation = translations[0] if translations else ""
-    finally:
-        translator.unload()
+            r.translation = " ".join(translated_parts)
+
+        del pipe, model, tokenizer
+        _flush_gpu()
+
+    except Exception as e:
+        logger.error("Translation failed: %s", e)
         _flush_gpu()
 
 
