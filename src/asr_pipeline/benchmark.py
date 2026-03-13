@@ -247,13 +247,9 @@ def run_omnilingual_model(
         # Join chunk transcripts
         text = " ".join(t.strip() for t in transcriptions if t.strip())
 
-        # Cleanup — aggressively release omnilingual/fairseq2 GPU tensors
+        # Cleanup — release GPU tensors but keep modules loaded
+        # (purging fairseq2 from sys.modules breaks its C bindings)
         del pipeline
-        # Purge omnilingual/fairseq2 modules so their GPU tensors get freed
-        import sys
-        for mod_name in list(sys.modules):
-            if mod_name.startswith(("omnilingual_asr", "fairseq2")):
-                del sys.modules[mod_name]
         _flush_gpu()
 
         return BenchmarkResult(
