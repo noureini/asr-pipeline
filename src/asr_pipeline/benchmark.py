@@ -189,6 +189,13 @@ def preprocess_audio(audio_path: Path) -> PreprocessedAudio:
     preprocessor = AudioPreprocessor(cfg.preprocessing, work_dir)
 
     wav_path, chunks, _non_speech = preprocessor.preprocess(audio_path)
+
+    # Explicitly release the Silero VAD model from GPU
+    if hasattr(preprocessor, "_vad_model") and preprocessor._vad_model is not None:
+        preprocessor._vad_model.cpu()
+        del preprocessor._vad_model
+    del preprocessor
+
     return PreprocessedAudio(
         original_path=audio_path,
         wav_path=wav_path,
@@ -408,6 +415,10 @@ def benchmark_models(
     preprocessed_files: list[PreprocessedAudio] = []
     for audio_path in audio_paths:
         preprocessed_files.append(preprocess_audio(audio_path))
+
+    # Free GPU after preprocessing — Silero VAD + torchaudio hold ~3GB VRAM
+    # The chunk WAV files on disk are all we need from here on.
+    _flush_gpu()
 
     try:
         for model_idx, model_id in enumerate(all_models):
