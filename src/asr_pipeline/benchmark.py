@@ -80,12 +80,24 @@ class BenchmarkReport:
 # ─────────────────────────────────────────────────────────────────────
 
 
-def preprocess_audio(audio_path: Path) -> Path:
+@dataclass
+class PreprocessedAudio:
+    """Result of preprocessing a single audio file."""
+
+    original_path: Path
+    wav_path: Path
+    chunks: list  # list[AudioChunk]
+    work_dir: Path
+
+
+def preprocess_audio(audio_path: Path) -> PreprocessedAudio:
     """
     Preprocess audio using the pipeline's AudioPreprocessor.
 
-    Runs: FFmpeg conversion → loudness normalization → noise reduction.
-    Returns path to the preprocessed WAV file (in a temp directory).
+    Runs the full chain: FFmpeg conversion → loudness normalization →
+    noise reduction → VAD → chunking.
+
+    Returns PreprocessedAudio with the full WAV and individual chunks.
     """
     from asr_pipeline.config import load_config
     from asr_pipeline.preprocessor import AudioPreprocessor
@@ -94,10 +106,13 @@ def preprocess_audio(audio_path: Path) -> Path:
     work_dir = Path(tempfile.mkdtemp(prefix="asr_bench_"))
     preprocessor = AudioPreprocessor(cfg.preprocessing, work_dir)
 
-    # preprocess() returns (wav_path, chunks, non_speech_regions)
-    # We only need the full preprocessed WAV, not the chunks
-    wav_path, _chunks, _non_speech = preprocessor.preprocess(audio_path)
-    return wav_path
+    wav_path, chunks, _non_speech = preprocessor.preprocess(audio_path)
+    return PreprocessedAudio(
+        original_path=audio_path,
+        wav_path=wav_path,
+        chunks=chunks,
+        work_dir=work_dir,
+    )
 
 
 # ─────────────────────────────────────────────────────────────────────
@@ -107,16 +122,16 @@ def preprocess_audio(audio_path: Path) -> Path:
 
 def run_omnilingual_model(
     model_card: str,
-    audio_path: Path,
+    preprocessed: PreprocessedAudio,
     language: str,
     device: str = "cuda",
 ) -> BenchmarkResult:
     """
-    Run an Omnilingual ASR model on a single audio file.
+    Run an Omnilingual ASR model on preprocessed audio chunks.
 
     Args:
         model_card: Omnilingual model card (e.g., "omniASR_CTC_300M_v2").
-        audio_path: Path to 16kHz mono WAV file.
+        preprocessed: PreprocessedAudio with chunks from the pipeline preprocessor.
         language: Language in {code}_{script} format (e.g., "ben_Beng").
         device: "cuda" or "cpu".
 
@@ -136,15 +151,19 @@ def run_omnilingual_model(
         t0 = time.perf_counter()
         pipeline = ASRInferencePipeline(model_card=model_card)
 
-        is_ctc = "CTC" in model_card.upper()
-        kwargs: dict = {"batch_size": 1}
-        if not is_ctc:
-            kwargs["lang"] = [language]
+        # Feed all chunk WAV paths to the model
+        chunk_paths = [str(c.waveform_path) for c in preprocessed.chunks]
 
-        transcriptions = pipeline.transcribe([str(audio_path)], **kwargs)
+        is_ctc = "CTC" in model_card.upper()
+        kwargs: dict = {"batch_size": min(len(chunk_paths), 8)}
+        if not is_ctc:
+            kwargs["lang"] = [language] * len(chunk_paths)
+
+        transcriptions = pipeline.transcribe(chunk_paths, **kwargs)
         elapsed = time.perf_counter() - t0
 
-        text = transcriptions[0].strip() if transcriptions else ""
+        # Join chunk transcripts
+        text = " ".join(t.strip() for t in transcriptions if t.strip())
 
         # Cleanup
         del pipeline
@@ -154,7 +173,7 @@ def run_omnilingual_model(
 
         return BenchmarkResult(
             model_id=model_card,
-            audio_file=audio_path.name,
+            audio_file=preprocessed.original_path.name,
             transcript=text,
             elapsed_s=elapsed,
         )
@@ -162,7 +181,7 @@ def run_omnilingual_model(
     except Exception as e:
         return BenchmarkResult(
             model_id=model_card,
-            audio_file=audio_path.name,
+            audio_file=preprocessed.original_path.name,
             transcript="",
             elapsed_s=0.0,
             error=str(e),
@@ -176,19 +195,19 @@ def run_omnilingual_model(
 
 def run_hf_model(
     model_id: str,
-    audio_path: Path,
+    preprocessed: PreprocessedAudio,
     language: str | None = None,
     device: str = "cuda",
 ) -> BenchmarkResult:
     """
     Run a HuggingFace ASR model (Whisper fine-tune, wav2vec2, etc.)
-    on a single audio file.
+    on preprocessed audio chunks.
 
     Uses the transformers `automatic-speech-recognition` pipeline.
 
     Args:
         model_id: HuggingFace model ID (e.g., "bangla-speech-processing/BanglaASR").
-        audio_path: Path to audio file (any format torchaudio can read).
+        preprocessed: PreprocessedAudio with chunks from the pipeline preprocessor.
         language: Optional language hint (used for Whisper models).
         device: "cuda" or "cpu".
 
@@ -210,8 +229,6 @@ def run_hf_model(
             model=model_id,
             torch_dtype=torch_dtype,
             device=device_idx,
-            chunk_length_s=30,
-            stride_length_s=(4, 2),
         )
 
         # Build generate kwargs for Whisper models
@@ -219,14 +236,20 @@ def run_hf_model(
         if language and hasattr(pipe.model.config, "forced_decoder_ids"):
             generate_kwargs["language"] = language
 
-        output = pipe(
-            str(audio_path),
-            generate_kwargs=generate_kwargs,
-            return_timestamps=True,
-        )
+        # Transcribe each chunk separately
+        texts = []
+        for chunk in preprocessed.chunks:
+            output = pipe(
+                str(chunk.waveform_path),
+                generate_kwargs=generate_kwargs,
+                return_timestamps=True,
+            )
+            chunk_text = output["text"].strip() if isinstance(output, dict) else str(output).strip()
+            if chunk_text:
+                texts.append(chunk_text)
 
         elapsed = time.perf_counter() - t0
-        text = output["text"].strip() if isinstance(output, dict) else str(output).strip()
+        text = " ".join(texts)
 
         # Cleanup
         del pipe
@@ -236,7 +259,7 @@ def run_hf_model(
 
         return BenchmarkResult(
             model_id=model_id,
-            audio_file=audio_path.name,
+            audio_file=preprocessed.original_path.name,
             transcript=text,
             elapsed_s=elapsed,
         )
@@ -244,7 +267,7 @@ def run_hf_model(
     except Exception as e:
         return BenchmarkResult(
             model_id=model_id,
-            audio_file=audio_path.name,
+            audio_file=preprocessed.original_path.name,
             transcript="",
             elapsed_s=0.0,
             error=str(e),
@@ -289,40 +312,36 @@ def benchmark_models(
         if m != baseline_model:
             all_models.append(m)
 
-    # Preprocess audio files once
-    wav_paths: list[tuple[Path, Path]] = []  # (original, preprocessed)
+    # Preprocess audio files once (full pipeline: convert → normalize → denoise → VAD → chunk)
+    preprocessed_files: list[PreprocessedAudio] = []
     for audio_path in audio_paths:
-        wav_path = preprocess_audio(audio_path)
-        wav_paths.append((audio_path, wav_path))
+        preprocessed_files.append(preprocess_audio(audio_path))
 
     try:
         for model_id in all_models:
-            for original_path, wav_path in wav_paths:
+            for preprocessed in preprocessed_files:
                 if is_omnilingual_model(model_id):
                     result = run_omnilingual_model(
                         model_card=model_id,
-                        audio_path=wav_path,
+                        preprocessed=preprocessed,
                         language=language_script,
                         device=device,
                     )
                 else:
                     result = run_hf_model(
                         model_id=model_id,
-                        audio_path=wav_path,
+                        preprocessed=preprocessed,
                         language=language,
                         device=device,
                     )
-                # Use the original filename for display
-                result.audio_file = original_path.name
                 report.results.append(result)
     finally:
         # Clean up temp directories created by preprocessor
         import shutil
 
-        for _, wav_path in wav_paths:
+        for p in preprocessed_files:
             try:
-                # wav_path is inside a temp work_dir, remove the whole dir
-                shutil.rmtree(wav_path.parent, ignore_errors=True)
+                shutil.rmtree(p.work_dir, ignore_errors=True)
             except OSError:
                 pass
 
