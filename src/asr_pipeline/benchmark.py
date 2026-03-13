@@ -59,10 +59,17 @@ def _flush_gpu():
     """Aggressively free GPU memory between model runs."""
     import torch
 
+    # Multiple gc passes to catch circular references
+    gc.collect()
+    gc.collect()
     gc.collect()
     if torch.cuda.is_available():
         torch.cuda.empty_cache()
         torch.cuda.synchronize()
+        # Log remaining VRAM for debugging
+        free = torch.cuda.mem_get_info()[0] / 1024**3
+        total = torch.cuda.mem_get_info()[1] / 1024**3
+        logger.info("GPU memory: %.2f / %.2f GiB free", free, total)
 
 
 def is_omnilingual_model(model_id: str) -> bool:
@@ -240,8 +247,13 @@ def run_omnilingual_model(
         # Join chunk transcripts
         text = " ".join(t.strip() for t in transcriptions if t.strip())
 
-        # Cleanup
+        # Cleanup — aggressively release omnilingual/fairseq2 GPU tensors
         del pipeline
+        # Purge omnilingual/fairseq2 modules so their GPU tensors get freed
+        import sys
+        for mod_name in list(sys.modules):
+            if mod_name.startswith(("omnilingual_asr", "fairseq2")):
+                del sys.modules[mod_name]
         _flush_gpu()
 
         return BenchmarkResult(
@@ -439,7 +451,7 @@ def translate_results(
     device: str = "cuda",
 ) -> None:
     """
-    Translate all benchmark transcripts using TranslateGemma.
+    Translate all benchmark transcripts using the pipeline's CT2 NLLB translator.
 
     Modifies results in-place, adding translation and timing.
 
@@ -450,7 +462,8 @@ def translate_results(
     """
     import torch
 
-    from asr_pipeline.postprocessor import TranslateGemmaTranslator
+    from asr_pipeline.config import load_config
+    from asr_pipeline.postprocessor import CTranslate2Translator
 
     # Skip if language is English
     if language in ("eng", "en"):
@@ -458,24 +471,29 @@ def translate_results(
             r.translation = r.transcript
         return
 
-    # Map ISO 639-3 to BCP-47 for TranslateGemma
-    _ISO3_TO_BCP47 = {
-        "ben": "bn", "hin": "hi", "spa": "es", "fra": "fr", "ara": "ar",
-        "por": "pt", "deu": "de", "zho": "zh", "jpn": "ja", "kor": "ko",
-        "rus": "ru", "tur": "tr", "ita": "it", "nld": "nl", "pol": "pl",
-        "vie": "vi", "tha": "th", "ind": "id", "swa": "sw", "amh": "am",
-        "urd": "ur", "tam": "ta", "tel": "te", "mar": "mr", "guj": "gu",
-        "kan": "kn", "mal": "ml", "pan": "pa", "mya": "my", "khm": "km",
-        "nep": "ne", "sin": "si", "ukr": "uk", "ces": "cs", "ron": "ro",
-        "hun": "hu", "ell": "el", "heb": "he", "fas": "fa", "fil": "tl",
-    }
-    source_bcp47 = _ISO3_TO_BCP47.get(language, language)
+    # Get NLLB source language code from pipeline config
+    cfg = load_config()
+    lang_cfg = cfg.languages.get(language)
+    if lang_cfg:
+        nllb_code = lang_cfg.nllb_code
+    else:
+        # Fallback: guess {iso3}_{Script}
+        nllb_code = f"{language}_Latn"
+        logger.warning(
+            "Language %s not in config, guessing NLLB code: %s",
+            language, nllb_code,
+        )
 
-    translator = TranslateGemmaTranslator(
-        quantize="4bit",
+    # Load CT2 NLLB translator using pipeline's configured model path
+    translator = CTranslate2Translator(
+        model_path=cfg.translation.ct2_model_path,
+        target_language="eng_Latn",
         device=device,
     )
-    translator.load()
+
+    if not translator.load():
+        logger.error("Failed to load CT2 NLLB translator — skipping translation")
+        return
 
     try:
         # Translate each result individually so we get per-model timing
@@ -485,16 +503,13 @@ def translate_results(
             t0 = time.perf_counter()
             translations = translator.translate_batch(
                 [r.transcript],
-                source_bcp47=source_bcp47,
-                target_bcp47="en",
+                source_language=nllb_code,
             )
             r.translation_elapsed_s = time.perf_counter() - t0
             r.translation = translations[0] if translations else ""
     finally:
         translator.unload()
-        gc.collect()
-        if torch.cuda.is_available():
-            torch.cuda.empty_cache()
+        _flush_gpu()
 
 
 # ─────────────────────────────────────────────────────────────────────
