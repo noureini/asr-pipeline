@@ -247,8 +247,10 @@ def run_omnilingual_model(
         # Join chunk transcripts
         text = " ".join(t.strip() for t in transcriptions if t.strip())
 
-        # Cleanup — release GPU tensors but keep modules loaded
-        # (purging fairseq2 from sys.modules breaks its C bindings)
+        # Cleanup — offload model to CPU first (like the main pipeline does),
+        # then delete. This frees GPU VRAM for the next model.
+        if hasattr(pipeline, "model"):
+            pipeline.model.cpu()
         del pipeline
         _flush_gpu()
 
@@ -373,7 +375,7 @@ def benchmark_models(
     language: str,
     language_script: str,
     device: str = "cuda",
-    baseline_model: str = "omniASR_CTC_300M_v2",
+    baseline_model: str | None = "omniASR_CTC_300M_v2",
 ) -> BenchmarkReport:
     """
     Run all models on all audio files and collect results.
@@ -394,10 +396,12 @@ def benchmark_models(
     """
     report = BenchmarkReport(language=language, device=device)
 
-    # Build the full model list: baseline first, then user-specified
-    all_models = [baseline_model]
+    # Build the full model list: baseline first (if set), then user-specified
+    all_models: list[str] = []
+    if baseline_model:
+        all_models.append(baseline_model)
     for m in model_ids:
-        if m != baseline_model:
+        if m not in all_models:
             all_models.append(m)
 
     # Preprocess audio files once (full pipeline: convert → normalize → denoise → VAD → chunk)

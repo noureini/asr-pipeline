@@ -437,7 +437,13 @@ def transcribe_folder(
     "--baseline",
     default="omniASR_CTC_300M_v2",
     show_default=True,
-    help="Baseline Omnilingual model card (always included).",
+    help="Baseline Omnilingual model card (included unless --no-baseline).",
+)
+@click.option(
+    "--no-baseline",
+    is_flag=True,
+    default=False,
+    help="Skip the baseline model — only run the models specified with -m.",
 )
 @click.option(
     "--translate", "-t",
@@ -453,6 +459,7 @@ def benchmark(
     save: Optional[Path],
     save_txt: Optional[Path],
     baseline: str,
+    no_baseline: bool,
     translate: bool,
 ) -> None:
     """
@@ -506,7 +513,10 @@ def benchmark(
 
     console.print(f"  Language:  [bold]{language}[/bold] ({language_script})")
     console.print(f"  Device:    [bold]{device}[/bold]")
-    console.print(f"  Baseline:  [bold]{baseline}[/bold]")
+    if not no_baseline:
+        console.print(f"  Baseline:  [bold]{baseline}[/bold]")
+    else:
+        console.print(f"  Baseline:  [dim]skipped[/dim]")
     console.print(f"  Models:    {', '.join(model_ids)}")
     console.print(f"  Audio:     {len(audio_files)} file(s)")
     console.print()
@@ -517,7 +527,7 @@ def benchmark(
         language=language,
         language_script=language_script,
         device=device,
-        baseline_model=baseline,
+        baseline_model=None if no_baseline else baseline,
     )
 
     if translate:
