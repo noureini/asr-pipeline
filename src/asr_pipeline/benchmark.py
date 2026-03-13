@@ -486,7 +486,7 @@ def translate_results(
 
     # Load CT2 NLLB translator using pipeline's configured model path
     translator = CTranslate2Translator(
-        model_path=cfg.translation.ct2_model_path,
+        model_path=cfg.postprocessing.translation.model_path,
         target_language="eng_Latn",
         device=device,
     )
