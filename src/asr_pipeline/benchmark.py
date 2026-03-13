@@ -40,6 +40,8 @@ class BenchmarkResult:
     transcript: str
     elapsed_s: float
     error: str | None = None
+    translation: str | None = None
+    translation_elapsed_s: float = 0.0
 
 
 @dataclass
@@ -61,6 +63,8 @@ class BenchmarkReport:
                     "transcript": r.transcript,
                     "elapsed_s": round(r.elapsed_s, 2),
                     "error": r.error,
+                    "translation": r.translation,
+                    "translation_elapsed_s": round(r.translation_elapsed_s, 2),
                 }
                 for r in self.results
             ],
@@ -78,28 +82,26 @@ class BenchmarkReport:
 
 def preprocess_audio(audio_path: Path, target_sr: int = 16_000) -> Path:
     """
-    Convert audio to 16kHz mono WAV for model consumption.
+    Convert audio to 16kHz mono WAV via FFmpeg (matches pipeline preprocessor).
 
     Returns path to the temporary WAV file.
     """
-    import torch
-    import torchaudio
+    import subprocess
 
-    waveform, sr = torchaudio.load(str(audio_path))
-
-    # Convert to mono
-    if waveform.shape[0] > 1:
-        waveform = waveform.mean(dim=0, keepdim=True)
-
-    # Resample if needed
-    if sr != target_sr:
-        resampler = torchaudio.transforms.Resample(sr, target_sr)
-        waveform = resampler(waveform)
-
-    # Save to temp file
     tmp = tempfile.NamedTemporaryFile(suffix=".wav", delete=False)
-    torchaudio.save(tmp.name, waveform, target_sr)
     tmp.close()
+
+    subprocess.run(
+        [
+            "ffmpeg", "-y", "-i", str(audio_path),
+            "-ac", "1", "-ar", str(target_sr),
+            "-acodec", "pcm_s16le",
+            "-loglevel", "error",
+            tmp.name,
+        ],
+        check=True,
+        capture_output=True,
+    )
     return Path(tmp.name)
 
 
@@ -213,6 +215,8 @@ def run_hf_model(
             model=model_id,
             torch_dtype=torch_dtype,
             device=device_idx,
+            chunk_length_s=30,
+            stride_length_s=(4, 2),
         )
 
         # Build generate kwargs for Whisper models
@@ -223,7 +227,7 @@ def run_hf_model(
         output = pipe(
             str(audio_path),
             generate_kwargs=generate_kwargs,
-            return_timestamps=False,
+            return_timestamps=True,
         )
 
         elapsed = time.perf_counter() - t0
@@ -328,6 +332,75 @@ def benchmark_models(
 
 
 # ─────────────────────────────────────────────────────────────────────
+# Translation pass
+# ─────────────────────────────────────────────────────────────────────
+
+
+def translate_results(
+    report: BenchmarkReport,
+    language: str,
+    device: str = "cuda",
+) -> None:
+    """
+    Translate all benchmark transcripts using TranslateGemma.
+
+    Modifies results in-place, adding translation and timing.
+
+    Args:
+        report: BenchmarkReport with transcripts to translate.
+        language: ISO 639-3 language code (e.g., "ben").
+        device: "cuda" or "cpu".
+    """
+    import torch
+
+    from asr_pipeline.postprocessor import TranslateGemmaTranslator
+
+    # Skip if language is English
+    if language in ("eng", "en"):
+        for r in report.results:
+            r.translation = r.transcript
+        return
+
+    # Map ISO 639-3 to BCP-47 for TranslateGemma
+    _ISO3_TO_BCP47 = {
+        "ben": "bn", "hin": "hi", "spa": "es", "fra": "fr", "ara": "ar",
+        "por": "pt", "deu": "de", "zho": "zh", "jpn": "ja", "kor": "ko",
+        "rus": "ru", "tur": "tr", "ita": "it", "nld": "nl", "pol": "pl",
+        "vie": "vi", "tha": "th", "ind": "id", "swa": "sw", "amh": "am",
+        "urd": "ur", "tam": "ta", "tel": "te", "mar": "mr", "guj": "gu",
+        "kan": "kn", "mal": "ml", "pan": "pa", "mya": "my", "khm": "km",
+        "nep": "ne", "sin": "si", "ukr": "uk", "ces": "cs", "ron": "ro",
+        "hun": "hu", "ell": "el", "heb": "he", "fas": "fa", "fil": "tl",
+    }
+    source_bcp47 = _ISO3_TO_BCP47.get(language, language)
+
+    translator = TranslateGemmaTranslator(
+        quantize="4bit",
+        device=device,
+    )
+    translator.load()
+
+    try:
+        # Translate each result individually so we get per-model timing
+        for r in report.results:
+            if r.error or not r.transcript.strip():
+                continue
+            t0 = time.perf_counter()
+            translations = translator.translate_batch(
+                [r.transcript],
+                source_bcp47=source_bcp47,
+                target_bcp47="en",
+            )
+            r.translation_elapsed_s = time.perf_counter() - t0
+            r.translation = translations[0] if translations else ""
+    finally:
+        translator.unload()
+        gc.collect()
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+
+
+# ─────────────────────────────────────────────────────────────────────
 # Display
 # ─────────────────────────────────────────────────────────────────────
 
@@ -340,6 +413,8 @@ def display_results(report: BenchmarkReport) -> None:
 
     console = Console()
 
+    has_translations = any(r.translation is not None for r in report.results)
+
     # Group results by audio file
     audio_files = list(dict.fromkeys(r.audio_file for r in report.results))
 
@@ -351,26 +426,41 @@ def display_results(report: BenchmarkReport) -> None:
             show_header=True,
             header_style="bold cyan",
             show_lines=True,
-            width=120,
+            width=160 if has_translations else 120,
         )
         table.add_column("Model", style="bold", width=35, no_wrap=True)
-        table.add_column("Transcript", width=60)
+        table.add_column("Transcript", width=55)
+        if has_translations:
+            table.add_column("English Translation", width=45)
         table.add_column("Time", width=8, justify="right")
         table.add_column("Status", width=8, justify="center")
 
         for r in file_results:
             if r.error:
-                status = Text("✗ FAIL", style="red")
+                status = Text("\u2717 FAIL", style="red")
                 transcript = Text(r.error, style="dim red")
+                row = [r.model_id, transcript]
+                if has_translations:
+                    row.append(Text("-", style="dim"))
             else:
-                status = Text("✓ OK", style="green")
+                status = Text("\u2713 OK", style="green")
                 transcript = Text(
                     r.transcript[:200] + ("..." if len(r.transcript) > 200 else ""),
                 )
+                row = [r.model_id, transcript]
+                if has_translations:
+                    if r.translation:
+                        trans_text = r.translation[:180] + ("..." if len(r.translation) > 180 else "")
+                        row.append(Text(trans_text, style="italic"))
+                    else:
+                        row.append(Text("-", style="dim"))
 
             time_str = f"{r.elapsed_s:.1f}s" if r.elapsed_s > 0 else "-"
+            if has_translations and r.translation_elapsed_s > 0:
+                time_str += f" +{r.translation_elapsed_s:.1f}s"
 
-            table.add_row(r.model_id, transcript, time_str, status)
+            row.extend([time_str, status])
+            table.add_row(*row)
 
         console.print(table)
         console.print()
