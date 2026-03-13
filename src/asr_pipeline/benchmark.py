@@ -25,6 +25,45 @@ logger = logging.getLogger("asr_pipeline")
 # Known Omnilingual model cards (prefix check)
 _OMNILINGUAL_PREFIXES = ("omniASR_CTC_", "omniASR_LLM_")
 
+# ISO 639-3 → Whisper full language name (for HF Whisper fine-tunes)
+_ISO3_TO_WHISPER_LANG: dict[str, str] = {
+    "ben": "bengali", "hin": "hindi", "spa": "spanish", "fra": "french",
+    "ara": "arabic", "por": "portuguese", "deu": "german", "zho": "chinese",
+    "jpn": "japanese", "kor": "korean", "rus": "russian", "tur": "turkish",
+    "ita": "italian", "nld": "dutch", "pol": "polish", "vie": "vietnamese",
+    "tha": "thai", "ind": "indonesian", "swa": "swahili", "amh": "amharic",
+    "urd": "urdu", "tam": "tamil", "tel": "telugu", "mar": "marathi",
+    "guj": "gujarati", "kan": "kannada", "mal": "malayalam", "pan": "punjabi",
+    "mya": "burmese", "khm": "khmer", "nep": "nepali", "sin": "sinhala",
+    "ukr": "ukrainian", "ces": "czech", "ron": "romanian", "hun": "hungarian",
+    "ell": "greek", "heb": "hebrew", "fas": "persian", "fil": "tagalog",
+    "cat": "catalan", "swe": "swedish", "fin": "finnish", "dan": "danish",
+    "nor": "norwegian", "hrv": "croatian", "bul": "bulgarian", "lit": "lithuanian",
+    "slk": "slovak", "slv": "slovenian", "est": "estonian", "lav": "latvian",
+    "mkd": "macedonian", "srp": "serbian", "bos": "bosnian", "sqi": "albanian",
+    "aze": "azerbaijani", "kaz": "kazakh", "uzb": "uzbek", "mon": "mongolian",
+    "hye": "armenian", "kat": "georgian", "bel": "belarusian", "tgk": "tajik",
+    "asm": "assamese", "lao": "lao", "msa": "malay", "mri": "maori",
+    "cym": "welsh", "gle": "irish", "eus": "basque", "glg": "galician",
+    "oci": "occitan", "bre": "breton", "isl": "icelandic", "mlt": "maltese",
+    "ltz": "luxembourgish", "yid": "yiddish", "hau": "hausa", "yor": "yoruba",
+    "som": "somali", "afr": "afrikaans", "jav": "javanese", "sun": "sundanese",
+    "hat": "haitian creole", "pus": "pashto", "tuk": "turkmen", "snd": "sindhi",
+    "san": "sanskrit", "tib": "tibetan", "haw": "hawaiian", "lin": "lingala",
+    "bak": "bashkir", "tat": "tatar", "mlg": "malagasy", "sho": "shona",
+    "eng": "english",
+}
+
+
+def _flush_gpu():
+    """Aggressively free GPU memory between model runs."""
+    import torch
+
+    gc.collect()
+    if torch.cuda.is_available():
+        torch.cuda.empty_cache()
+        torch.cuda.synchronize()
+
 
 def is_omnilingual_model(model_id: str) -> bool:
     """Check if a model ID refers to an Omnilingual model card."""
@@ -167,9 +206,7 @@ def run_omnilingual_model(
 
         # Cleanup
         del pipeline
-        gc.collect()
-        if torch.cuda.is_available():
-            torch.cuda.empty_cache()
+        _flush_gpu()
 
         return BenchmarkResult(
             model_id=model_card,
@@ -179,6 +216,7 @@ def run_omnilingual_model(
         )
 
     except Exception as e:
+        _flush_gpu()
         return BenchmarkResult(
             model_id=model_card,
             audio_file=preprocessed.original_path.name,
@@ -232,9 +270,11 @@ def run_hf_model(
         )
 
         # Build generate kwargs for Whisper models
+        # Map ISO 639-3 → Whisper's full language name
         generate_kwargs = {}
         if language and hasattr(pipe.model.config, "forced_decoder_ids"):
-            generate_kwargs["language"] = language
+            whisper_lang = _ISO3_TO_WHISPER_LANG.get(language, language)
+            generate_kwargs["language"] = whisper_lang
 
         # Transcribe each chunk separately
         texts = []
@@ -253,9 +293,7 @@ def run_hf_model(
 
         # Cleanup
         del pipe
-        gc.collect()
-        if torch.cuda.is_available():
-            torch.cuda.empty_cache()
+        _flush_gpu()
 
         return BenchmarkResult(
             model_id=model_id,
@@ -265,6 +303,7 @@ def run_hf_model(
         )
 
     except Exception as e:
+        _flush_gpu()
         return BenchmarkResult(
             model_id=model_id,
             audio_file=preprocessed.original_path.name,
@@ -318,7 +357,12 @@ def benchmark_models(
         preprocessed_files.append(preprocess_audio(audio_path))
 
     try:
-        for model_id in all_models:
+        for model_idx, model_id in enumerate(all_models):
+            # Flush GPU between models to avoid OOM
+            if model_idx > 0:
+                logger.info("Flushing GPU memory before loading %s", model_id)
+                _flush_gpu()
+
             for preprocessed in preprocessed_files:
                 if is_omnilingual_model(model_id):
                     result = run_omnilingual_model(
