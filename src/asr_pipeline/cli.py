@@ -428,6 +428,12 @@ def transcribe_folder(
     help="Save results to a JSON file.",
 )
 @click.option(
+    "--save-txt",
+    type=click.Path(path_type=Path),
+    default=None,
+    help="Save results to a readable text comparison file.",
+)
+@click.option(
     "--baseline",
     default="omniASR_CTC_300M_v2",
     show_default=True,
@@ -445,6 +451,7 @@ def benchmark(
     model_ids: tuple[str, ...],
     device: Optional[str],
     save: Optional[Path],
+    save_txt: Optional[Path],
     baseline: str,
     translate: bool,
 ) -> None:
@@ -523,6 +530,16 @@ def benchmark(
     if save:
         report.save_json(save)
         console.print(f"[green]Results saved to {save}[/green]")
+
+    if save_txt:
+        report.save_txt(save_txt)
+        console.print(f"[green]Text comparison saved to {save_txt}[/green]")
+
+    # Auto-save txt if no output specified
+    if not save and not save_txt:
+        auto_path = Path(f"benchmark_{language}.txt")
+        report.save_txt(auto_path)
+        console.print(f"[green]Text comparison auto-saved to {auto_path}[/green]")
 
 
 @main.command()

@@ -113,6 +113,42 @@ class BenchmarkReport:
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(json.dumps(self.to_dict(), indent=2, ensure_ascii=False))
 
+    def save_txt(self, path: Path) -> None:
+        """Save results as a readable text comparison file."""
+        path.parent.mkdir(parents=True, exist_ok=True)
+        lines: list[str] = []
+        lines.append("=" * 80)
+        lines.append("ASR BENCHMARK COMPARISON")
+        lines.append(f"Language: {self.language}  |  Device: {self.device}")
+        lines.append("=" * 80)
+
+        audio_files = list(dict.fromkeys(r.audio_file for r in self.results))
+        for audio_file in audio_files:
+            file_results = [r for r in self.results if r.audio_file == audio_file]
+            lines.append("")
+            lines.append(f"Audio: {audio_file}")
+            lines.append("-" * 80)
+
+            for r in file_results:
+                status = "FAIL" if r.error else "OK"
+                time_str = f"{r.elapsed_s:.1f}s" if r.elapsed_s > 0 else "-"
+                lines.append(f"\n[{r.model_id}]  ({time_str}, {status})")
+
+                if r.error:
+                    lines.append(f"  ERROR: {r.error}")
+                else:
+                    lines.append(f"  TRANSCRIPT:")
+                    lines.append(f"  {r.transcript}")
+
+                    if r.translation:
+                        lines.append(f"  TRANSLATION ({r.translation_elapsed_s:.1f}s):")
+                        lines.append(f"  {r.translation}")
+
+            lines.append("-" * 80)
+
+        lines.append("")
+        path.write_text("\n".join(lines), encoding="utf-8")
+
 
 # ─────────────────────────────────────────────────────────────────────
 # Audio preprocessing
