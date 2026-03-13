@@ -300,6 +300,8 @@ def run_hf_model(
     Returns:
         BenchmarkResult with transcript and timing.
     """
+    import warnings
+
     import torch
 
     try:
@@ -324,17 +326,20 @@ def run_hf_model(
             whisper_lang = _ISO3_TO_WHISPER_LANG.get(language, language)
             generate_kwargs["language"] = whisper_lang
 
-        # Transcribe each chunk separately
+        # Transcribe each chunk separately (suppress Whisper timestamp warnings)
         texts = []
-        for chunk in preprocessed.chunks:
-            output = pipe(
-                str(chunk.waveform_path),
-                generate_kwargs=generate_kwargs,
-                return_timestamps=True,
-            )
-            chunk_text = output["text"].strip() if isinstance(output, dict) else str(output).strip()
-            if chunk_text:
-                texts.append(chunk_text)
+        with warnings.catch_warnings():
+            warnings.filterwarnings("ignore", message=".*ending timestamp.*")
+            warnings.filterwarnings("ignore", category=FutureWarning)
+            for chunk in preprocessed.chunks:
+                output = pipe(
+                    str(chunk.waveform_path),
+                    generate_kwargs=generate_kwargs,
+                    return_timestamps=True,
+                )
+                chunk_text = output["text"].strip() if isinstance(output, dict) else str(output).strip()
+                if chunk_text:
+                    texts.append(chunk_text)
 
         elapsed = time.perf_counter() - t0
         text = " ".join(texts)
@@ -484,9 +489,12 @@ def translate_results(
             language, nllb_code,
         )
 
-    # Load CT2 NLLB translator using pipeline's configured model path
+    # Load CT2 NLLB translator — use config path or default ~/.asr-pipeline/models/ct2-nllb
+    ct2_path = cfg.postprocessing.translation.model_path
+    if not ct2_path:
+        ct2_path = str(Path.home() / ".asr-pipeline" / "models" / "ct2-nllb")
     translator = CTranslate2Translator(
-        model_path=cfg.postprocessing.translation.model_path,
+        model_path=ct2_path,
         target_language="eng_Latn",
         device=device,
     )
