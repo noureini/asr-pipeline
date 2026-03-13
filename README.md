@@ -232,7 +232,7 @@ languages:
 
 ### CLI Commands
 
-#### Transcribe Audio
+#### Transcribe a Single File
 
 ```bash
 # Basic transcription (Spanish)
@@ -257,6 +257,43 @@ uv run asr-pipeline transcribe audio.m4a -l eng --diarization-backend nemo_msdd
 uv run asr-pipeline transcribe audio.m4a -l spa --log-level DEBUG --log-file run.log
 ```
 
+#### Transcribe a Folder (Batch Processing)
+
+Process an entire folder of Survey Solutions interviews at once. The command expects the following folder structure:
+
+```
+FOLDER/
+  {interview_key}/
+    AudioAudit/
+      *.m4a
+```
+
+Each interview directory gets a consolidated transcript with absolute timestamps derived from the recording start times encoded in the audio filenames.
+
+```bash
+# Transcribe all interviews in a folder (Bengali)
+uv run asr-pipeline transcribe-folder ./interviews --language ben
+
+# With custom output directory and all formats
+uv run asr-pipeline transcribe-folder ./data -l spa -o ./transcripts -f all
+
+# With project name and speaker limits
+uv run asr-pipeline transcribe-folder ./fieldwork -l amh -p "Ethiopia Study" --max-speakers 5
+```
+
+**Resume support:** If a run is interrupted, simply re-run the same command. Already-completed interviews (those with existing output directories) are automatically skipped. Only remaining interviews are processed.
+
+```bash
+# Safe to re-run — skips already-completed interviews
+uv run asr-pipeline transcribe-folder ./interviews -l ben -o ./outputs/interviews_2026-03-12 -f all
+```
+
+**Key features:**
+- Models are loaded once and reused across all files (no per-file startup cost)
+- Multiple audio files per interview are merged into a single consolidated transcript
+- Timestamps are adjusted to absolute time based on filename-encoded recording start times
+- Progress is displayed per-interview and per-file
+
 #### List Supported Languages
 
 ```bash
@@ -269,10 +306,19 @@ uv run asr-pipeline list-languages
 uv run asr-pipeline check-deps
 ```
 
-#### Setup Post-Processing Models
+#### Setup Models
 
 ```bash
+# Full setup (downloads all ASR models + TranslateGemma)
 uv run asr-pipeline setup
+
+# Skip ASR models (only set up translation)
+uv run asr-pipeline setup --skip-asr-models
+
+# Skip translation setup
+uv run asr-pipeline setup --skip-translation
+
+# Use legacy CT2 NLLB + Ollama backend
 uv run asr-pipeline setup --translation-backend ct2_nllb
 ```
 
@@ -385,10 +431,11 @@ asr-pipeline/
 |-- src/asr_pipeline/
 |   |-- __init__.py             # Package init, version
 |   |-- __main__.py             # python -m asr_pipeline entry point
-|   |-- cli.py                  # Click CLI (transcribe, list-languages, check-deps, setup)
+|   |-- cli.py                  # Click CLI (transcribe, transcribe-folder, setup, etc.)
 |   |-- config.py               # Pydantic config loading from YAML
 |   |-- default.yaml            # Default configuration file
 |   |-- pipeline.py             # Main ASR orchestration pipeline
+|   |-- batch.py                # Folder batch processing (interview discovery, merging)
 |   |-- preprocessor.py         # Audio preprocessing (VAD, noise reduction, chunking)
 |   |-- alignment.py            # Speaker-segment alignment and merging
 |   |-- forced_aligner.py       # wav2vec2 MMS forced alignment
@@ -399,6 +446,7 @@ asr-pipeline/
 |   |-- language.py             # Language registry and routing
 |   |-- logging_config.py       # Logging setup (Rich console)
 |   |-- models.py               # Pydantic data models (segments, transcripts)
+|   |-- finetune.py             # Model fine-tuning utilities
 |   |-- engines/
 |       |-- __init__.py         # Engine exports
 |       |-- whisper_engine.py   # Whisper Large-v3 ASR engine
@@ -406,6 +454,8 @@ asr-pipeline/
 |
 |-- tests/
 |   |-- test_pipeline.py        # Unit tests (config, models, alignment, formatting)
+|
+|-- test_data/                  # Sample interview folders for batch testing
 |
 |-- presentation/
 |   |-- ASR_Pipeline_Feb26.pdf  # Project presentation slides
