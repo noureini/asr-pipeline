@@ -80,29 +80,24 @@ class BenchmarkReport:
 # ─────────────────────────────────────────────────────────────────────
 
 
-def preprocess_audio(audio_path: Path, target_sr: int = 16_000) -> Path:
+def preprocess_audio(audio_path: Path) -> Path:
     """
-    Convert audio to 16kHz mono WAV via FFmpeg (matches pipeline preprocessor).
+    Preprocess audio using the pipeline's AudioPreprocessor.
 
-    Returns path to the temporary WAV file.
+    Runs: FFmpeg conversion → loudness normalization → noise reduction.
+    Returns path to the preprocessed WAV file (in a temp directory).
     """
-    import subprocess
+    from asr_pipeline.config import load_config
+    from asr_pipeline.preprocessor import AudioPreprocessor
 
-    tmp = tempfile.NamedTemporaryFile(suffix=".wav", delete=False)
-    tmp.close()
+    cfg = load_config()
+    work_dir = Path(tempfile.mkdtemp(prefix="asr_bench_"))
+    preprocessor = AudioPreprocessor(cfg.preprocessing, work_dir)
 
-    subprocess.run(
-        [
-            "ffmpeg", "-y", "-i", str(audio_path),
-            "-ac", "1", "-ar", str(target_sr),
-            "-acodec", "pcm_s16le",
-            "-loglevel", "error",
-            tmp.name,
-        ],
-        check=True,
-        capture_output=True,
-    )
-    return Path(tmp.name)
+    # preprocess() returns (wav_path, chunks, non_speech_regions)
+    # We only need the full preprocessed WAV, not the chunks
+    wav_path, _chunks, _non_speech = preprocessor.preprocess(audio_path)
+    return wav_path
 
 
 # ─────────────────────────────────────────────────────────────────────
@@ -321,10 +316,13 @@ def benchmark_models(
                 result.audio_file = original_path.name
                 report.results.append(result)
     finally:
-        # Clean up temp files
+        # Clean up temp directories created by preprocessor
+        import shutil
+
         for _, wav_path in wav_paths:
             try:
-                wav_path.unlink(missing_ok=True)
+                # wav_path is inside a temp work_dir, remove the whole dir
+                shutil.rmtree(wav_path.parent, ignore_errors=True)
             except OSError:
                 pass
 
