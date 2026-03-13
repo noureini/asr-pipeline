@@ -398,6 +398,120 @@ def transcribe_folder(
 
 
 @main.command()
+@click.argument("audio", type=click.Path(exists=True, path_type=Path))
+@click.option(
+    "--language", "-l",
+    required=True,
+    help="ISO 639-3 language code (e.g., ben, hin, swa).",
+)
+@click.option(
+    "--model", "-m",
+    "model_ids",
+    multiple=True,
+    required=True,
+    help=(
+        "Model to benchmark. Repeat for multiple models. "
+        "Use Omnilingual model cards (e.g., omniASR_LLM_300M_v2) "
+        "or HuggingFace model IDs (e.g., bangla-speech-processing/BanglaASR)."
+    ),
+)
+@click.option(
+    "--device",
+    type=click.Choice(["cuda", "cpu"], case_sensitive=False),
+    default=None,
+    help="Compute device. Default: cuda.",
+)
+@click.option(
+    "--save", "-s",
+    type=click.Path(path_type=Path),
+    default=None,
+    help="Save results to a JSON file.",
+)
+@click.option(
+    "--baseline",
+    default="omniASR_CTC_300M_v2",
+    show_default=True,
+    help="Baseline Omnilingual model card (always included).",
+)
+def benchmark(
+    audio: Path,
+    language: str,
+    model_ids: tuple[str, ...],
+    device: Optional[str],
+    save: Optional[Path],
+    baseline: str,
+) -> None:
+    """
+    Benchmark ASR models side-by-side on the same audio.
+
+    Compares multiple ASR models (Omnilingual variants, HuggingFace
+    fine-tuned models) on the same audio files. Models are loaded one
+    at a time to stay within GPU memory limits.
+
+    The current pipeline baseline model is always included for comparison.
+
+    \b
+    Examples:
+        asr-pipeline benchmark audio.m4a -l ben -m omniASR_LLM_300M_v2
+        asr-pipeline benchmark audio.m4a -l ben -m omniASR_LLM_300M_v2 -m bangla-speech-processing/BanglaASR
+        asr-pipeline benchmark ./folder/ -l ben -m omniASR_LLM_300M_v2 --save results.json
+    """
+    from asr_pipeline.benchmark import (
+        benchmark_models,
+        collect_audio_files,
+        display_results,
+    )
+    from asr_pipeline.config import load_config
+    from asr_pipeline.logging_config import console
+
+    console.print()
+    console.print("[bold cyan]ASR Pipeline — Model Benchmark[/bold cyan]")
+    console.print()
+
+    # Resolve device
+    if device is None:
+        import torch
+
+        device = "cuda" if torch.cuda.is_available() else "cpu"
+
+    # Resolve language script from config
+    cfg = load_config()
+    lang_cfg = cfg.languages.get(language)
+    if lang_cfg:
+        language_script = f"{language}_{lang_cfg.script}"
+    else:
+        language_script = f"{language}_Latn"
+
+    # Collect audio files
+    audio_files = collect_audio_files(audio)
+    if not audio_files:
+        console.print(f"[red]No audio files found at {audio}[/red]")
+        return
+
+    console.print(f"  Language:  [bold]{language}[/bold] ({language_script})")
+    console.print(f"  Device:    [bold]{device}[/bold]")
+    console.print(f"  Baseline:  [bold]{baseline}[/bold]")
+    console.print(f"  Models:    {', '.join(model_ids)}")
+    console.print(f"  Audio:     {len(audio_files)} file(s)")
+    console.print()
+
+    report = benchmark_models(
+        audio_paths=audio_files,
+        model_ids=list(model_ids),
+        language=language,
+        language_script=language_script,
+        device=device,
+        baseline_model=baseline,
+    )
+
+    display_results(report)
+
+    if save:
+        report.save_json(save)
+        console.print(f"[green]Results saved to {save}[/green]")
+
+
+@main.command()
 def list_languages() -> None:
     """List all configured languages and their tier assignments."""
     from rich.table import Table
