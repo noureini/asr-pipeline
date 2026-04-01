@@ -256,3 +256,54 @@ class TranscriptResult(BaseModel):
     metadata: TranscriptMetadata
     segments: list[ProcessedSegment]
     non_speech_segments: list[NonSpeechSegment] = Field(default_factory=list)
+
+
+# =============================================================================
+# Microphone testing models
+# =============================================================================
+
+
+class MicAudioMetrics(BaseModel):
+    """Acoustic quality metrics for a single audio file."""
+
+    file_path: str
+    mic_name: str
+    folder_key: str
+    duration_s: float
+    snr_db: float  # VAD-based signal-to-noise ratio
+    clipped_samples: int  # samples with |amplitude| >= 0.99
+    clipping_ratio: float  # clipped / total samples
+    plosive_spike_count: int  # detected plosive energy spikes
+    spectral_rolloff_hz: float  # freq below which 85% energy lies
+    effective_bandwidth_hz: float  # bandwidth of significant energy
+    crosstalk_ratio: float  # non-speech energy / speech energy
+    peak_amplitude: float
+    rms_dbfs: float
+    speech_ratio: float  # fraction of audio that is speech
+
+
+class MicSummary(BaseModel):
+    """Aggregated metrics for one microphone across all test files."""
+
+    mic_name: str
+    num_files: int
+    avg_snr_db: float
+    avg_clipping_ratio: float
+    total_plosive_spikes: int
+    avg_spectral_rolloff_hz: float
+    avg_effective_bandwidth_hz: float
+    avg_crosstalk_ratio: float
+    avg_rms_dbfs: float
+    avg_speech_ratio: float
+    score: float = 0.0  # weighted composite score
+    files: list[MicAudioMetrics] = Field(default_factory=list)
+
+
+class MicTestReport(BaseModel):
+    """Full mic comparison report."""
+
+    test_date: str
+    language: str
+    mic_summaries: list[MicSummary] = Field(default_factory=list)
+    recommendation: str = ""
+    transcriptions: dict[str, str] = Field(default_factory=dict)

@@ -1123,5 +1123,189 @@ def setup(
             )
 
 
+@main.command("test-mics")
+@click.argument(
+    "folder",
+    type=click.Path(exists=True, file_okay=False, path_type=Path),
+)
+@click.option(
+    "--language", "-l",
+    required=True,
+    help="ISO 639-3 language code for transcription (e.g., ben).",
+)
+@click.option(
+    "--config", "-c",
+    type=click.Path(exists=True, path_type=Path),
+    default=None,
+    help="Path to custom YAML config file.",
+)
+@click.option(
+    "--output-dir", "-o",
+    type=click.Path(path_type=Path),
+    default=None,
+    help="Output directory for JSON report. Default: ./outputs/mic-test",
+)
+@click.option(
+    "--skip-transcription",
+    is_flag=True,
+    default=False,
+    help="Only compute acoustic metrics, skip ASR transcription.",
+)
+@click.option(
+    "--device",
+    type=click.Choice(["cuda", "cpu"], case_sensitive=False),
+    default=None,
+    help="Compute device. Default: cuda (from config).",
+)
+@click.option(
+    "--log-level",
+    type=click.Choice(["DEBUG", "INFO", "WARNING", "ERROR"], case_sensitive=False),
+    default=None,
+    help="Logging level. Default: INFO",
+)
+def test_mics(
+    folder: Path,
+    language: str,
+    config: Optional[Path],
+    output_dir: Optional[Path],
+    skip_transcription: bool,
+    device: Optional[str],
+    log_level: Optional[str],
+) -> None:
+    """
+    Compare microphone quality using test recordings.
+
+    Analyzes audio files from multiple microphones and produces a
+    comparative report with SNR, clipping, spectral, and cross-talk metrics.
+    Optionally transcribes each file for qualitative comparison.
+
+    \b
+    Expected folder structure:
+        FOLDER/{interview_key}/AudioAudit/*.m4a
+
+    A README.txt in the folder maps interview keys to mic names.
+
+    \b
+    Examples:
+        asr-pipeline test-mics ./mic-test-data -l ben
+        asr-pipeline test-mics ./mic-test-data -l ben --skip-transcription
+        asr-pipeline test-mics ./mic-test-data -l ben -o ./reports
+    """
+    from datetime import datetime
+
+    from asr_pipeline.config import load_config
+    from asr_pipeline.logging_config import console, setup_logging
+    from asr_pipeline.mic_test import (
+        MicTester,
+        discover_test_audio,
+        display_mic_report,
+        parse_mic_mapping,
+        save_report,
+    )
+    from asr_pipeline.models import MicTestReport
+
+    # Setup
+    setup_logging(log_level or "INFO")
+    cfg = load_config(config)
+    if device:
+        cfg.pipeline.device = device
+
+    if output_dir is None:
+        output_dir = Path(cfg.pipeline.output_dir) / "mic-test"
+
+    # ── Step 1: Parse mic mapping ──────────────────────────────────
+    readme_path = folder / "README.txt"
+    if not readme_path.exists():
+        console.print(
+            f"[red]Error:[/red] No README.txt found in {folder}. "
+            "Create one mapping folder keys to mic names."
+        )
+        raise SystemExit(1)
+
+    folder_mic_map = parse_mic_mapping(readme_path)
+    console.print(
+        f"[bold cyan]Mic Mapping:[/bold cyan] "
+        f"Found {len(folder_mic_map)} folders across "
+        f"{len(set(folder_mic_map.values()))} microphones"
+    )
+    for mic_name in sorted(set(folder_mic_map.values())):
+        folders = [k for k, v in folder_mic_map.items() if v == mic_name]
+        console.print(f"  {mic_name}: {', '.join(folders)}")
+
+    # ── Step 2: Discover audio files ───────────────────────────────
+    file_map = discover_test_audio(folder)
+    total_files = sum(len(f) for f in file_map.values())
+    console.print(
+        f"\n[bold cyan]Audio Files:[/bold cyan] "
+        f"Found {total_files} files in {len(file_map)} folders"
+    )
+
+    if total_files == 0:
+        console.print("[red]Error:[/red] No audio files found.")
+        raise SystemExit(1)
+
+    # ── Step 3: Acoustic analysis ──────────────────────────────────
+    console.print("\n[bold cyan]Running acoustic analysis...[/bold cyan]")
+    tester = MicTester(cfg)
+    summaries = tester.analyze_all(file_map, folder_mic_map)
+    recommendation = tester.generate_recommendation(summaries)
+
+    # ── Step 4: Transcription (optional) ───────────────────────────
+    transcriptions: dict[str, str] = {}
+    if not skip_transcription:
+        console.print(
+            "\n[bold cyan]Running transcription...[/bold cyan]"
+        )
+        from asr_pipeline.pipeline import ASRPipeline
+
+        pipeline = ASRPipeline(cfg)
+        file_idx = 0
+        for folder_key, audio_files in sorted(file_map.items()):
+            for audio_path in audio_files:
+                file_idx += 1
+                console.print(
+                    f"  [{file_idx}/{total_files}] Transcribing "
+                    f"[file]{audio_path.name}[/file]"
+                )
+                try:
+                    result = pipeline.transcribe(
+                        audio_path=audio_path,
+                        language=language,
+                        output_dir=output_dir / "transcripts" / folder_key,
+                        project_name="mic-test",
+                    )
+                    # Extract combined transcript text
+                    if result and result.segments:
+                        text = " ".join(
+                            seg.corrected_text or seg.raw_text
+                            for seg in result.segments
+                        )
+                        transcriptions[str(audio_path)] = text
+                except Exception as e:
+                    console.print(
+                        f"    [red]Transcription failed:[/red] {e}"
+                    )
+                    transcriptions[str(audio_path)] = f"[ERROR: {e}]"
+
+        pipeline.cleanup_all()
+
+    # ── Step 5: Build report ───────────────────────────────────────
+    report = MicTestReport(
+        test_date=datetime.now().isoformat(),
+        language=language,
+        mic_summaries=summaries,
+        recommendation=recommendation,
+        transcriptions=transcriptions,
+    )
+
+    # ── Step 6: Display & save ─────────────────────────────────────
+    display_mic_report(report)
+
+    report_path = save_report(report, output_dir)
+    console.print(
+        f"\n[green]Report saved:[/green] [file]{report_path}[/file]"
+    )
+
+
 if __name__ == "__main__":
     main()
