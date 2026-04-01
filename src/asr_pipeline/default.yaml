@@ -266,9 +266,9 @@ whisper:
   batch_size: 8                     # Number of chunks processed in parallel (lower if OOM)
 
 omnilingual:
-  model_card: "omniASR_CTC_300M_v2"     # Default: fits 16GB GPU
-  # model_card: "omniASR_CTC_1B_v2"     # Better accuracy, needs 24GB
-  # model_card: "omniASR_LLM_300M_v2"   # LLM variant for zero-shot
+  model_card: "omniASR_LLM_300M_v2"     # Default: LLM variant for production use
+  # model_card: "omniASR_CTC_300M_v2"   # CTC variant (faster, less accurate)
+  # model_card: "omniASR_CTC_1B_v2"     # CTC 1B (better accuracy, needs 24GB)
   zero_shot_model_card: "omniASR_LLM_300M_v2"  # For zero-shot new languages
   max_audio_length_s: 40            # Omnilingual limit per chunk
 

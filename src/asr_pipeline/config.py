@@ -84,7 +84,7 @@ class WhisperConfig(BaseModel):
 
 
 class OmnilingualConfig(BaseModel):
-    model_card: str = "omniASR_CTC_300M_v2"
+    model_card: str = "omniASR_LLM_300M_v2"
     zero_shot_model_card: str = "omniASR_LLM_300M_v2"
     max_audio_length_s: int = 40
 
