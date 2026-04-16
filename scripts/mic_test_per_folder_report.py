@@ -79,6 +79,35 @@ def aggregate_by_folder(report: dict) -> list[dict]:
     return out
 
 
+def extract_per_file(report: dict) -> list[dict]:
+    """Flatten the report into one row per audio file, with the same
+    quality classification used for the per-folder summary."""
+    out: list[dict] = []
+    for summary in report.get("mic_summaries", []):
+        for f in summary.get("files", []):
+            snr = float(f["snr_db"])
+            speech_pct = float(f["speech_ratio"]) * 100.0
+            flag, comment = classify_quality(snr, speech_pct)
+            out.append({
+                "folder": f["folder_key"],
+                "filename": Path(f["file_path"]).name,
+                "mic": f["mic_name"],
+                "duration_s": float(f["duration_s"]),
+                "snr_db": snr,
+                "clip_pct": float(f["clipping_ratio"]) * 100.0,
+                "plosives": int(f["plosive_spike_count"]),
+                "rolloff_hz": float(f["spectral_rolloff_hz"]),
+                "bandwidth_hz": float(f["effective_bandwidth_hz"]),
+                "crosstalk": float(f["crosstalk_ratio"]),
+                "rms_dbfs": float(f["rms_dbfs"]),
+                "speech_pct": speech_pct,
+                "quality_flag": flag,
+                "comment": comment,
+            })
+    out.sort(key=lambda r: (r["folder"], r["filename"]))
+    return out
+
+
 def write_csv(rows: list[dict], path: Path) -> None:
     import csv
     with path.open("w", newline="", encoding="utf-8") as fh:
@@ -87,34 +116,32 @@ def write_csv(rows: list[dict], path: Path) -> None:
         writer.writerows(rows)
 
 
-def write_xlsx(rows: list[dict], path: Path, title: str) -> None:
-    """Write a formatted .xlsx with a header, frozen panes, autosize, and
-    a colour-coded Quality column."""
-    from openpyxl import Workbook
+FLAG_FILLS_HEX = {
+    "GOOD": "C8F0C8",
+    "OK": "FDF3C2",
+    "LOW SPEECH": "FDE2B3",
+    "POOR": "F7C4C4",
+    "BAD": "E89696",
+}
+
+
+def _populate_sheet(
+    ws,
+    rows: list[dict],
+    headers_display: list[str],
+    keys: list[str],
+    quality_col_idx: int,
+    title: str,
+) -> None:
+    """Fill an openpyxl worksheet with title, header, data, and footer."""
     from openpyxl.styles import Alignment, Font, PatternFill
     from openpyxl.utils import get_column_letter
 
-    headers_display = [
-        "Folder ID", "Mic", "Files", "Duration (s)",
-        "SNR (dB)", "Clip %", "Plosives",
-        "Rolloff (Hz)", "Bandwidth (Hz)", "Crosstalk",
-        "RMS (dBFS)", "Speech %", "Quality", "Comment",
-    ]
-    keys = [
-        "folder", "mic", "n_files", "duration_s",
-        "snr_db", "clip_pct", "plosives",
-        "rolloff_hz", "bandwidth_hz", "crosstalk",
-        "rms_dbfs", "speech_pct", "quality_flag", "comment",
-    ]
-
-    wb = Workbook()
-    ws = wb.active
-    ws.title = "Per-folder quality"
+    ncols = len(headers_display)
 
     # Title row
     ws.cell(row=1, column=1, value=title).font = Font(bold=True, size=13)
-    ws.merge_cells(start_row=1, start_column=1,
-                   end_row=1, end_column=len(headers_display))
+    ws.merge_cells(start_row=1, start_column=1, end_row=1, end_column=ncols)
 
     # Header row
     header_fill = PatternFill("solid", fgColor="1F3B6E")
@@ -126,13 +153,7 @@ def write_xlsx(rows: list[dict], path: Path, title: str) -> None:
         c.alignment = Alignment(horizontal="center", vertical="center")
 
     # Data rows
-    flag_fills = {
-        "GOOD": PatternFill("solid", fgColor="C8F0C8"),
-        "OK": PatternFill("solid", fgColor="FDF3C2"),
-        "LOW SPEECH": PatternFill("solid", fgColor="FDE2B3"),
-        "POOR": PatternFill("solid", fgColor="F7C4C4"),
-        "BAD": PatternFill("solid", fgColor="E89696"),
-    }
+    flag_fills = {k: PatternFill("solid", fgColor=v) for k, v in FLAG_FILLS_HEX.items()}
     for row_idx, r in enumerate(rows, start=3):
         for col_idx, key in enumerate(keys, start=1):
             val = r[key]
@@ -142,10 +163,9 @@ def write_xlsx(rows: list[dict], path: Path, title: str) -> None:
                     cell.number_format = "0.0000"
                 else:
                     cell.number_format = "0.0"
-        # Colour the Quality cell
         flag = r["quality_flag"]
         if flag in flag_fills:
-            qcell = ws.cell(row=row_idx, column=13)
+            qcell = ws.cell(row=row_idx, column=quality_col_idx)
             qcell.fill = flag_fills[flag]
             qcell.font = Font(bold=True)
 
@@ -153,8 +173,9 @@ def write_xlsx(rows: list[dict], path: Path, title: str) -> None:
     last_data_row = 2 + len(rows)
     footer_row = last_data_row + 1
     ws.cell(row=footer_row, column=1, value="MEAN").font = Font(bold=True)
+    skip_keys = {"folder", "filename", "mic", "quality_flag", "comment"}
     for col_idx, key in enumerate(keys, start=1):
-        if key in ("folder", "mic", "quality_flag", "comment"):
+        if key in skip_keys:
             continue
         col_letter = get_column_letter(col_idx)
         formula = f"=AVERAGE({col_letter}3:{col_letter}{last_data_row})"
@@ -166,16 +187,63 @@ def write_xlsx(rows: list[dict], path: Path, title: str) -> None:
         else:
             cell.number_format = "0.0"
 
-    # Freeze header + autosize
+    # Freeze + filter + autosize
     ws.freeze_panes = "A3"
-    ws.auto_filter.ref = f"A2:{get_column_letter(len(headers_display))}{last_data_row}"
-    for col_idx in range(1, len(headers_display) + 1):
+    ws.auto_filter.ref = f"A2:{get_column_letter(ncols)}{last_data_row}"
+    for col_idx in range(1, ncols + 1):
         col_letter = get_column_letter(col_idx)
         max_len = max(
             (len(str(ws.cell(row=r, column=col_idx).value or "")) for r in range(2, footer_row + 1)),
             default=10,
         )
-        ws.column_dimensions[col_letter].width = min(max(max_len + 2, 10), 40)
+        ws.column_dimensions[col_letter].width = min(max(max_len + 2, 10), 50)
+
+
+def write_xlsx(
+    folder_rows: list[dict],
+    file_rows: list[dict],
+    path: Path,
+    title: str,
+) -> None:
+    """Write a formatted .xlsx with two sheets: per-folder and per-file."""
+    from openpyxl import Workbook
+
+    folder_headers = [
+        "Folder ID", "Mic", "Files", "Duration (s)",
+        "SNR (dB)", "Clip %", "Plosives",
+        "Rolloff (Hz)", "Bandwidth (Hz)", "Crosstalk",
+        "RMS (dBFS)", "Speech %", "Quality", "Comment",
+    ]
+    folder_keys = [
+        "folder", "mic", "n_files", "duration_s",
+        "snr_db", "clip_pct", "plosives",
+        "rolloff_hz", "bandwidth_hz", "crosstalk",
+        "rms_dbfs", "speech_pct", "quality_flag", "comment",
+    ]
+    file_headers = [
+        "Folder ID", "Filename", "Mic", "Duration (s)",
+        "SNR (dB)", "Clip %", "Plosives",
+        "Rolloff (Hz)", "Bandwidth (Hz)", "Crosstalk",
+        "RMS (dBFS)", "Speech %", "Quality", "Comment",
+    ]
+    file_keys = [
+        "folder", "filename", "mic", "duration_s",
+        "snr_db", "clip_pct", "plosives",
+        "rolloff_hz", "bandwidth_hz", "crosstalk",
+        "rms_dbfs", "speech_pct", "quality_flag", "comment",
+    ]
+
+    wb = Workbook()
+
+    ws1 = wb.active
+    ws1.title = "Per folder"
+    _populate_sheet(ws1, folder_rows, folder_headers, folder_keys,
+                    quality_col_idx=13, title=f"{title} — per folder")
+
+    ws2 = wb.create_sheet("Per file")
+    file_title = title.replace("by Folder", "by File")
+    _populate_sheet(ws2, file_rows, file_headers, file_keys,
+                    quality_col_idx=13, title=f"{file_title} — per file")
 
     wb.save(path)
 
@@ -297,7 +365,10 @@ def main() -> None:
     out_dir = args.output_dir or args.report_json.parent
     out_dir.mkdir(parents=True, exist_ok=True)
 
-    csv_path = out_dir / "per-folder-report.csv"
+    file_rows = extract_per_file(report)
+
+    folder_csv = out_dir / "per-folder-report.csv"
+    file_csv = out_dir / "per-file-report.csv"
     png_path = out_dir / "per-folder-report.png"
     xlsx_path = out_dir / "per-folder-report.xlsx"
 
@@ -305,13 +376,15 @@ def main() -> None:
         f"Audio Quality by Folder — {report.get('language', '?')} — "
         f"{report.get('test_date', '?')[:10]} ({len(rows)} folders)"
     )
-    write_csv(rows, csv_path)
+    write_csv(rows, folder_csv)
+    write_csv(file_rows, file_csv)
     render_png(rows, png_path, title)
-    write_xlsx(rows, xlsx_path, title)
+    write_xlsx(rows, file_rows, xlsx_path, title)
 
-    print(f"Wrote {csv_path}")
+    print(f"Wrote {folder_csv}")
+    print(f"Wrote {file_csv}")
     print(f"Wrote {png_path}")
-    print(f"Wrote {xlsx_path}")
+    print(f"Wrote {xlsx_path}  (sheets: 'Per folder', 'Per file')")
 
 
 if __name__ == "__main__":
