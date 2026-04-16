@@ -322,6 +322,80 @@ uv run asr-pipeline setup --skip-translation
 uv run asr-pipeline setup --translation-backend ct2_nllb
 ```
 
+#### Test Microphone / Audio Quality
+
+The `test-mics` command analyses the acoustic quality of recordings from one or
+more microphones and produces a comparative JSON report.
+
+**Expected folder structure** (Survey Solutions–style, same as `transcribe-folder`):
+
+```
+FOLDER/
+  README.txt                        <-- maps interview keys to mic names
+  {interview_key}/
+    AudioAudit/
+      *.m4a
+```
+
+**`README.txt` format** — one `# Mic Name` heading per microphone followed by
+the interview keys recorded with that mic:
+
+```
+# DJI Mic 3
+35-36-03-87
+84-00-39-86
+
+# Hollyland Lark M2
+53-78-11-24
+```
+
+If every folder uses the same mic (e.g. a single-device test), put every key
+under one heading.
+
+**Run it:**
+
+```bash
+# Acoustic metrics only (fast — no ASR)
+uv run asr-pipeline test-mics ./mic-test-data -l ben --skip-transcription
+
+# Full run including transcription / WER comparison
+uv run asr-pipeline test-mics ./mic-test-data -l ben
+
+# Custom output directory
+uv run asr-pipeline test-mics ./mic-test-data -l ben -o ./outputs/mic-test
+```
+
+**Per-file metrics computed:**
+- **SNR (dB)** — VAD-based signal-to-noise ratio (higher = better)
+- **Clipping %** — fraction of samples saturating to ±1.0 (lower = better)
+- **Plosive spikes** — count of detected plosive bursts
+- **Spectral rolloff (Hz)** — frequency below which 85 % of energy lies
+- **Effective bandwidth (Hz)** — span of significant spectral energy
+- **Crosstalk** — non-speech / speech energy ratio (lower = better)
+- **RMS (dBFS)** — recording loudness
+- **Speech %** — fraction of audio classified as speech
+
+The CLI prints two Rich tables (per-file and per-mic averages) plus a textual
+recommendation, and writes the full report to
+`<output_dir>/mic-test-report.json`.
+
+**Per-folder summary table (CSV + PNG + XLSX):** for the common case where each
+folder is a separate respondent / interview, a helper script aggregates the
+per-file metrics into one row per folder, classifies each folder with a
+quality flag (`GOOD` / `OK` / `LOW SPEECH` / `POOR` / `BAD`), and exports the
+result in three formats:
+
+```bash
+uv run python scripts/mic_test_per_folder_report.py \
+    outputs/mic-test/mic-test-report.json
+```
+
+This writes the following files next to the JSON:
+
+- `per-folder-report.csv` — sortable spreadsheet
+- `per-folder-report.png` — rendered table image; best/worst SNR rows highlighted, Quality column colour-coded, MEAN footer row
+- `per-folder-report.xlsx` — formatted Excel workbook with header, frozen panes, auto-filter, colour-coded Quality column, and a live `=AVERAGE(...)` MEAN footer
+
 ### Quick Test with Included Audio Files
 
 The repository includes two test audio files you can use to verify the pipeline:
