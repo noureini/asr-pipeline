@@ -393,8 +393,29 @@ uv run python scripts/mic_test_per_folder_report.py \
 This writes the following files next to the JSON:
 
 - `per-folder-report.csv` — sortable spreadsheet
+- `per-file-report.csv` — same metrics broken down per individual audio file
 - `per-folder-report.png` — rendered table image; best/worst SNR rows highlighted, Quality column colour-coded, MEAN footer row
-- `per-folder-report.xlsx` — formatted Excel workbook with header, frozen panes, auto-filter, colour-coded Quality column, and a live `=AVERAGE(...)` MEAN footer
+- `per-folder-report.xlsx` — formatted Excel workbook with two tabs (`Per folder`, `Per file`), frozen header, auto-filter, colour-coded Quality column, and a live `=AVERAGE(...)` MEAN footer
+
+**Per-speaker analysis (optional, requires diarization):** to assess audio quality
+*separately for the enumerator and the respondent* (very useful for phone-mic
+interviews where the respondent's voice comes through the phone earpiece and is
+intrinsically lower quality), run:
+
+```bash
+# Heavy: re-runs speaker diarization on every file (~30-60 min on GPU for 100 files)
+uv run python scripts/mic_test_per_speaker.py \
+    ./mic-test-data -l ben -o outputs/mic-test
+```
+
+This writes:
+
+- `per-speaker-report.csv` — one row per (file × speaker) with their own SNR, bandwidth, talk-time, etc.
+- `per-speaker-report.json` — same data; automatically picked up by `mic_test_per_folder_report.py` to add a third **`Per speaker`** tab to the XLSX
+
+Speakers are labelled **ENUMERATOR** or **RESPONDENT** using simple heuristics
+(who speaks first, total turns, average turn length). Re-run the per-folder
+report afterwards to refresh the XLSX with the new tab.
 
 ### Quick Test with Included Audio Files
 

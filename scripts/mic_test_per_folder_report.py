@@ -173,7 +173,8 @@ def _populate_sheet(
     last_data_row = 2 + len(rows)
     footer_row = last_data_row + 1
     ws.cell(row=footer_row, column=1, value="MEAN").font = Font(bold=True)
-    skip_keys = {"folder", "filename", "mic", "quality_flag", "comment"}
+    skip_keys = {"folder", "filename", "mic", "speaker_id", "role",
+                 "quality_flag", "comment"}
     for col_idx, key in enumerate(keys, start=1):
         if key in skip_keys:
             continue
@@ -204,8 +205,11 @@ def write_xlsx(
     file_rows: list[dict],
     path: Path,
     title: str,
+    speaker_rows: list[dict] | None = None,
 ) -> None:
-    """Write a formatted .xlsx with two sheets: per-folder and per-file."""
+    """Write a formatted .xlsx with up to three sheets:
+    'Per folder', 'Per file' and (optionally) 'Per speaker'.
+    """
     from openpyxl import Workbook
 
     folder_headers = [
@@ -232,6 +236,20 @@ def write_xlsx(
         "rolloff_hz", "bandwidth_hz", "crosstalk",
         "rms_dbfs", "speech_pct", "quality_flag", "comment",
     ]
+    speaker_headers = [
+        "Folder ID", "Filename", "Mic", "Speaker", "Role",
+        "Talk time (s)", "Turns", "Avg turn (s)",
+        "SNR (dB)", "Clip %", "Plosives",
+        "Rolloff (Hz)", "Bandwidth (Hz)", "Crosstalk",
+        "RMS (dBFS)", "Quality", "Comment",
+    ]
+    speaker_data_keys = [
+        "folder", "filename", "mic", "speaker_id", "role",
+        "talk_time_s", "n_turns", "avg_turn_s",
+        "snr_db", "clip_pct", "plosives",
+        "rolloff_hz", "bandwidth_hz", "crosstalk",
+        "rms_dbfs", "quality_flag", "comment",
+    ]
 
     wb = Workbook()
 
@@ -244,6 +262,14 @@ def write_xlsx(
     file_title = title.replace("by Folder", "by File")
     _populate_sheet(ws2, file_rows, file_headers, file_keys,
                     quality_col_idx=13, title=f"{file_title} — per file")
+
+    if speaker_rows:
+        ws3 = wb.create_sheet("Per speaker")
+        spk_title = title.replace("by Folder", "by Speaker")
+        _populate_sheet(
+            ws3, speaker_rows, speaker_headers, speaker_data_keys,
+            quality_col_idx=16, title=f"{spk_title} — per speaker",
+        )
 
     wb.save(path)
 
@@ -367,6 +393,17 @@ def main() -> None:
 
     file_rows = extract_per_file(report)
 
+    # Optional per-speaker JSON (produced by mic_test_per_speaker.py)
+    speaker_rows: list[dict] = []
+    speaker_json = out_dir / "per-speaker-report.json"
+    if speaker_json.exists():
+        try:
+            speaker_rows = json.loads(speaker_json.read_text(encoding="utf-8")).get(
+                "rows", []
+            )
+        except Exception as e:
+            print(f"Warning: could not read {speaker_json}: {e}")
+
     folder_csv = out_dir / "per-folder-report.csv"
     file_csv = out_dir / "per-file-report.csv"
     png_path = out_dir / "per-folder-report.png"
@@ -379,12 +416,18 @@ def main() -> None:
     write_csv(rows, folder_csv)
     write_csv(file_rows, file_csv)
     render_png(rows, png_path, title)
-    write_xlsx(rows, file_rows, xlsx_path, title)
+    write_xlsx(rows, file_rows, xlsx_path, title, speaker_rows=speaker_rows)
 
+    sheets = "'Per folder', 'Per file'"
+    if speaker_rows:
+        sheets += ", 'Per speaker'"
     print(f"Wrote {folder_csv}")
     print(f"Wrote {file_csv}")
     print(f"Wrote {png_path}")
-    print(f"Wrote {xlsx_path}  (sheets: 'Per folder', 'Per file')")
+    print(f"Wrote {xlsx_path}  (sheets: {sheets})")
+    if speaker_rows:
+        print(f"  Per-speaker rows picked up from {speaker_json.name}: "
+              f"{len(speaker_rows)}")
 
 
 if __name__ == "__main__":
