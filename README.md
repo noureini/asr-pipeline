@@ -6,11 +6,12 @@ Supports **1,600+ languages** through a two-tier engine architecture that routes
 
 ## Table of Contents
 
+- [Pipeline Walkthrough](#pipeline-walkthrough) ← **start here**
 - [Architecture](#architecture)
 - [Prerequisites](#prerequisites)
 - [Installation](#installation)
 - [Configuration](#configuration)
-- [Usage](#usage)
+- [Usage](#usage) — full CLI reference
 - [LoRA Fine-Tuning Experiments](#lora-fine-tuning-experiments)
 - [Testing](#testing)
 - [Project Structure](#project-structure)
@@ -19,6 +20,110 @@ Supports **1,600+ languages** through a two-tier engine architecture that routes
 - [Hardware Requirements](#hardware-requirements)
 - [Troubleshooting](#troubleshooting)
 - [License](#license)
+
+## Pipeline Walkthrough
+
+A complete survey transcription workflow runs in 4 sequential steps. Each step has
+its own command and produces its own output. You can run them independently or
+chain them together.
+
+```
+┌─────────────────┐     ┌──────────────────┐     ┌──────────────────┐     ┌────────────────┐
+│  Step 0         │     │  Step 1          │     │  Step 2          │     │  Step 3        │
+│  Audio quality  │ ──▶ │  Transcribe      │ ──▶ │  Diarize         │ ──▶ │  Output JSON / │
+│  → Excel report │     │  + LLM correct   │     │  speakers        │     │  Excel / SRT   │
+└─────────────────┘     └──────────────────┘     └──────────────────┘     └────────────────┘
+       ↓ (optional)            ↓ (optional)                                     ↓
+   Filter out               Use custom-trained                          Plug into your
+   POOR/BAD audio           LoRA model for                              survey research
+                            Bengali (or other                           pipeline
+                            low-resource langs)
+```
+
+### Step 0 — Audio Quality Check
+
+Before transcribing anything, run a quality assessment so you know what you're
+working with. **One command, one Excel.**
+
+```bash
+uv run python scripts/audio_quality_report.py /path/to/audio/folder
+```
+
+This recursively scans the folder, computes per-file metrics (SNR, clipping,
+speech %, RMS, peak), classifies each recording (`EXCELLENT`/`GOOD`/`FAIR`/
+`LOW SPEECH`/`EMPTY`/`POOR`/`BAD`/`CLIPPED`/`MUTED`/`BROKEN`), and writes
+`quality_report.xlsx` to the folder.
+
+Open the Excel — color-coded `quality` column and a `score` (0-100) per file.
+Filter the spreadsheet by `quality` to find broken recordings to flag for
+re-recording, or pre-filter your transcription queue to skip the BAD ones.
+
+[Detailed audio quality docs →](#audio-quality-assessment)
+
+### Step 1 — Transcribe Audio
+
+Once you've filtered out unusable recordings, transcribe the rest:
+
+```bash
+# Single file
+uv run asr-pipeline transcribe interview.m4a -l ben
+
+# Whole folder (Survey Solutions style)
+uv run asr-pipeline transcribe-folder /path/to/audio --language ben
+```
+
+Outputs JSON with full transcript, per-segment text, speaker IDs, and timestamps.
+Also produces SRT subtitles and Excel summary.
+
+The pipeline automatically:
+- Preprocesses audio (resample to 16kHz, normalize loudness, denoise)
+- Detects language (or uses your `--language` flag)
+- Routes to the right engine (Whisper for high-resource, Omnilingual CTC for the rest)
+- Runs speaker diarization (pyannote 3.1)
+- LLM post-processing for correction and English translation
+
+[Full CLI reference →](#cli-commands)
+
+### Step 2 — (Optional) Custom LoRA for Bengali / Low-Resource Languages
+
+If the default LLM correction isn't accurate enough for your target language,
+fine-tune a custom LoRA on phoneme-based correction data. Comprehensive workflow
+included for Bengali (extends to any low-resource language with the same
+infrastructure).
+
+```bash
+# Build dataset from public corpora (FLEURS, Bengali_AI_Speech, banspeech, SKNahin)
+uv run python scripts/extract_ipa_local.py --output-dir ./lora_data_ipa
+
+# Train LoRA on RTX 3060+ (30-60 min)
+uv run python scripts/train_lora_ipa_local.py \
+    --train ./lora_data_ipa/lora_dataset_full_ipa_train.jsonl \
+    --val   ./lora_data_ipa/lora_dataset_full_ipa_val.jsonl
+
+# Compare against your prior baselines
+uv run python scripts/compare_lora_vs_baseline.py \
+    --gguf models/qwen_ipa_lora/gguf/*.gguf \
+    --baseline-json results/baseline_merged.json
+```
+
+[Full LoRA workflow →](#lora-fine-tuning-experiments)
+
+### Step 3 — Use Outputs
+
+The pipeline emits structured JSON with per-segment text, speaker IDs, timestamps,
+and refined translations. Plug into your downstream survey analysis workflow
+(R / Python / Excel / Stata / etc.).
+
+```python
+import json
+with open("output.json") as f:
+    result = json.load(f)
+for seg in result["segments"]:
+    print(f"[{seg['speaker_id']}] {seg['corrected_text']}")
+    print(f"  → {seg['refined_translation']}")
+```
+
+[Full output format reference →](#output-format)
 
 ## Architecture
 
@@ -338,20 +443,36 @@ That's it. The script will:
 
 1. Walk the folder recursively for audio files (`.m4a`, `.wav`, `.mp3`, `.flac`, etc.)
 2. Compute acoustic metrics per file (SNR, RMS, clipping %, speech %, peak level, duration)
-3. Classify each file: **GOOD** / **OK** / **LOW SPEECH** / **POOR** / **BAD** / **CLIPPED**
+3. Classify each file with a 10-tier quality system + a 0-100 score
 4. Write `quality_report.xlsx` to the folder, with:
    - One row per file
-   - Color-coded `quality` column (green for GOOD, red for BAD, etc.)
+   - Color-coded `quality` column
+   - 0-100 `score` column (sortable to find the worst recordings fast)
    - Auto-filter on the header row
    - Summary footer (distribution + averages)
 
+##### Quality flags
+
+| Flag | Score | Meaning | Use? |
+|---|---|---|---|
+| 🟢 **EXCELLENT** | 90-100 | Studio-quality (SNR ≥ 25, ≥ 50% speech, no clipping) | Yes — premium training data |
+| 🟢 **GOOD** | 80-89 | Clean, speech-rich (SNR ≥ 20, ≥ 35% speech) | Yes — standard training/inference |
+| 🟡 **FAIR** | 50-69 | Acceptable (SNR ≥ 15, ≥ 25% speech) | Yes — expect minor errors |
+| 🟠 **LOW SPEECH** | ~55 | Clean audio but mostly silent (mic far / muted speaker) | Maybe — speaker may be inaudible |
+| 🟠 **EMPTY** | ~30 | Almost no speech (<10%) — possibly background recording | Investigate |
+| 🟠 **POOR** | 25-40 | Noisy (SNR 10-13 dB) — high WER expected | Last resort only |
+| 🔴 **BAD** | 10-15 | Barely audible (SNR < 10 dB) | No — discard |
+| 🟣 **CLIPPED** | 10-60 | Distortion from mic gain too high | Reduce gain, re-record |
+| ⚫ **MUTED** | 0 | No signal (RMS < -55 dBFS) — mic off | Fix recording setup |
+| ⚫ **BROKEN** | 0 | Too short (< 1s) — incomplete recording | Discard |
+
 Sample output:
 
-| file | folder | duration_s | snr_db | rms_dbfs | clipping_pct | speech_pct | quality | comment |
-|---|---|---|---|---|---|---|---|---|
-| recording_001.m4a | interview_42 | 1841.2 | 24.3 | -18.1 | 0.000 | 67.4 | **GOOD** | clean, speech-rich |
-| recording_002.m4a | interview_43 | 122.0 | 11.0 | -42.1 | 0.002 | 18.0 | **POOR** | very noisy, expect high WER |
-| recording_003.m4a | interview_44 | 1543.7 | 18.5 | -34.2 | 1.450 | 32.1 | **CLIPPED** | distortion: 1.5% clipped samples |
+| file | folder | duration_s | snr_db | rms_dbfs | clipping_pct | speech_pct | quality | score | comment |
+|---|---|---|---|---|---|---|---|---|---|
+| recording_001.m4a | interview_42 | 1841.2 | 27.3 | -18.1 | 0.000 | 67.4 | **EXCELLENT** | 95 | studio-quality (SNR 27 dB, 67% speech) — ideal for ASR |
+| recording_002.m4a | interview_43 | 122.0 | 11.0 | -42.1 | 0.002 | 18.0 | **POOR** | 25 | very noisy (SNR 11 dB) — ASR will struggle, high WER expected |
+| recording_003.m4a | interview_44 | 1543.7 | 18.5 | -34.2 | 1.450 | 32.1 | **CLIPPED** | 30 | heavy distortion: 1.45% samples clipped — reduce mic gain |
 
 Common options:
 
@@ -365,6 +486,12 @@ uv run python scripts/audio_quality_report.py /path/to/audio --extensions .m4a .
 # Cap at first N files (for quick spot-checks)
 uv run python scripts/audio_quality_report.py /path/to/audio --max-files 50
 ```
+
+**Customizing thresholds:** quality flags are determined by the
+`classify_quality()` function in `scripts/audio_quality_report.py`. Edit the
+function directly to match your project's tolerance for noise / silence /
+distortion. The thresholds shipped here are tuned for phone-mic field
+interview audio.
 
 ##### Advanced — `test-mics` CLI (compare microphones, run with transcription)
 

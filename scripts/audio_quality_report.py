@@ -105,23 +105,68 @@ def compute_metrics(wav: np.ndarray, sr: int = 16000) -> dict:
 # ─── Quality classification ──────────────────────────────────────────────
 
 def classify_quality(snr: float, speech_pct: float,
-                     clipping_pct: float, rms_dbfs: float) -> tuple[str, str]:
-    """Return (flag, comment). Thresholds tuned for phone-mic interview audio."""
+                     clipping_pct: float, rms_dbfs: float,
+                     duration_s: float = 0.0) -> tuple[str, str, int]:
+    """Return (flag, comment, score 0-100).
+
+    Thresholds tuned for phone-mic field interview audio. Hierarchical:
+    technical issues (clipping, muted, too short) take precedence over
+    content quality (SNR, speech %).
+    """
+    # ─── Technical issues (override everything else) ────────────────
+    if duration_s > 0 and duration_s < 1.0:
+        return "BROKEN", f"too short ({duration_s:.1f}s) — likely incomplete recording", 0
+
     if clipping_pct > 1.0:
-        return "CLIPPED", f"distortion: {clipping_pct:.1f}% clipped samples"
-    if rms_dbfs < -50:
-        return "BAD", "very quiet — mic likely muted or unplugged"
-    if snr < 8:
-        return "BAD", "near-silent / no usable speech"
-    if snr < 12:
-        return "POOR", "very noisy, expect high WER"
-    if snr >= 20 and speech_pct >= 40:
-        return "GOOD", "clean, speech-rich"
-    if snr >= 15 and speech_pct < 25:
-        return "LOW SPEECH", "high SNR but mostly silent — mic far / muted"
-    if snr >= 12 and speech_pct >= 30:
-        return "OK", "usable, moderate noise"
-    return "OK", "marginal — review recommended"
+        sev = min(100, int(clipping_pct * 30))
+        return "CLIPPED", \
+               f"heavy distortion: {clipping_pct:.2f}% samples clipped — reduce mic gain", \
+               max(10, 40 - sev)
+
+    if clipping_pct > 0.1:
+        return "CLIPPED", \
+               f"some distortion: {clipping_pct:.2f}% clipped — slightly hot recording", \
+               60
+
+    if rms_dbfs < -55:
+        return "MUTED", "no signal detected — mic likely off or unplugged", 0
+
+    if rms_dbfs < -45:
+        return "BAD", f"very quiet (RMS {rms_dbfs:.0f} dBFS) — mic likely muted or far away", 15
+
+    # ─── Content quality based on SNR + speech % ───────────────────
+    if snr < 6:
+        return "BAD", f"barely audible (SNR {snr:.0f} dB) — no usable speech", 10
+
+    if snr < 10:
+        return "POOR", f"very noisy (SNR {snr:.0f} dB) — ASR will struggle, high WER expected", 25
+
+    if snr < 13:
+        return "POOR", f"noisy (SNR {snr:.0f} dB) — usable but expect errors", 40
+
+    # SNR is decent — refine by speech %
+    if speech_pct < 10:
+        return "EMPTY", \
+               f"almost no speech ({speech_pct:.0f}%) — possibly background recording", 30
+
+    if speech_pct < 25:
+        return "LOW SPEECH", \
+               f"clean audio (SNR {snr:.0f} dB) but mostly silent ({speech_pct:.0f}% speech) — mic far/muted speaker", 55
+
+    if snr >= 25 and speech_pct >= 50 and clipping_pct < 0.05:
+        return "EXCELLENT", \
+               f"studio-quality (SNR {snr:.0f} dB, {speech_pct:.0f}% speech) — ideal for ASR", 95
+
+    if snr >= 20 and speech_pct >= 35:
+        return "GOOD", \
+               f"clean, speech-rich (SNR {snr:.0f} dB, {speech_pct:.0f}% speech)", 85
+
+    if snr >= 15 and speech_pct >= 25:
+        return "FAIR", \
+               f"acceptable (SNR {snr:.0f} dB, {speech_pct:.0f}% speech) — expect minor errors", 65
+
+    return "FAIR", \
+           f"marginal (SNR {snr:.0f} dB, {speech_pct:.0f}% speech) — review recommended", 50
 
 
 # ─── Excel writer ────────────────────────────────────────────────────────
@@ -149,8 +194,9 @@ def write_excel(rows: list[dict], out_path: Path):
         ("peak_dbfs", 11),
         ("clipping_pct", 13),
         ("speech_pct", 12),
-        ("quality", 12),
-        ("comment", 50),
+        ("quality", 13),
+        ("score", 8),
+        ("comment", 60),
     ]
     headers = [c[0] for c in columns]
     ws.append(headers)
@@ -162,12 +208,16 @@ def write_excel(rows: list[dict], out_path: Path):
 
     # Color map
     quality_colors = {
-        "GOOD":       "C6EFCE",  # green
-        "OK":         "FFEB9C",  # light yellow
+        "EXCELLENT":  "63BE7B",  # bright green
+        "GOOD":       "C6EFCE",  # light green
+        "FAIR":       "FFEB9C",  # light yellow
         "LOW SPEECH": "FFD18C",  # orange
+        "EMPTY":      "F4B084",  # darker orange
         "POOR":       "FFC7CE",  # light red
         "BAD":        "FF6B6B",  # red
         "CLIPPED":    "B19CD9",  # purple
+        "MUTED":      "808080",  # gray
+        "BROKEN":     "404040",  # dark gray
     }
 
     for r in rows:
@@ -181,6 +231,7 @@ def write_excel(rows: list[dict], out_path: Path):
             round(r["clipping_pct"], 3),
             round(r["speech_pct"], 1),
             r["quality"],
+            r.get("score", 0),
             r["comment"],
         ])
         # Color the quality cell
@@ -209,7 +260,8 @@ def write_excel(rows: list[dict], out_path: Path):
     summary_row += 1
     ws.cell(summary_row, 1).value = "Quality distribution:"
     ws.cell(summary_row, 1).font = Font(bold=True)
-    for flag in ["GOOD", "OK", "LOW SPEECH", "POOR", "BAD", "CLIPPED"]:
+    for flag in ["EXCELLENT", "GOOD", "FAIR", "LOW SPEECH", "EMPTY",
+                 "POOR", "BAD", "CLIPPED", "MUTED", "BROKEN"]:
         count = quality_counts.get(flag, 0)
         if count == 0:
             continue
@@ -300,15 +352,17 @@ def main():
         try:
             wav, sr = load_audio_mono16k(path)
             metrics = compute_metrics(wav, sr)
-            flag, comment = classify_quality(
+            flag, comment, score = classify_quality(
                 metrics["snr_db"], metrics["speech_pct"],
                 metrics["clipping_pct"], metrics["rms_dbfs"],
+                metrics["duration_s"],
             )
             rel_path = path.relative_to(args.folder)
             row = {
                 "file": str(rel_path.name),
                 "folder": str(rel_path.parent) if rel_path.parent != Path(".") else "",
                 "quality": flag,
+                "score": score,
                 "comment": comment,
                 **metrics,
             }
@@ -339,7 +393,8 @@ def main():
     print(f"SUMMARY: {len(rows)} files processed ({n_errors} errors)")
     print(f"{'=' * 60}")
     quality_counts = Counter(r["quality"] for r in rows)
-    for flag in ["GOOD", "OK", "LOW SPEECH", "POOR", "BAD", "CLIPPED"]:
+    for flag in ["EXCELLENT", "GOOD", "FAIR", "LOW SPEECH", "EMPTY",
+                 "POOR", "BAD", "CLIPPED", "MUTED", "BROKEN"]:
         count = quality_counts.get(flag, 0)
         if count > 0:
             pct = 100 * count / len(rows)
