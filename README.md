@@ -323,10 +323,53 @@ uv run asr-pipeline setup --skip-translation
 uv run asr-pipeline setup --translation-backend ct2_nllb
 ```
 
-#### Test Microphone / Audio Quality
+#### Audio Quality Assessment
 
-The `test-mics` command analyses the acoustic quality of recordings from one or
-more microphones and produces a comparative JSON report.
+##### Quick path — one command, one Excel (recommended)
+
+Point at a folder of recordings, get a color-coded Excel report. No setup,
+no mapping files, no language flag.
+
+```bash
+uv run python scripts/audio_quality_report.py /path/to/audio/folder
+```
+
+That's it. The script will:
+
+1. Walk the folder recursively for audio files (`.m4a`, `.wav`, `.mp3`, `.flac`, etc.)
+2. Compute acoustic metrics per file (SNR, RMS, clipping %, speech %, peak level, duration)
+3. Classify each file: **GOOD** / **OK** / **LOW SPEECH** / **POOR** / **BAD** / **CLIPPED**
+4. Write `quality_report.xlsx` to the folder, with:
+   - One row per file
+   - Color-coded `quality` column (green for GOOD, red for BAD, etc.)
+   - Auto-filter on the header row
+   - Summary footer (distribution + averages)
+
+Sample output:
+
+| file | folder | duration_s | snr_db | rms_dbfs | clipping_pct | speech_pct | quality | comment |
+|---|---|---|---|---|---|---|---|---|
+| recording_001.m4a | interview_42 | 1841.2 | 24.3 | -18.1 | 0.000 | 67.4 | **GOOD** | clean, speech-rich |
+| recording_002.m4a | interview_43 | 122.0 | 11.0 | -42.1 | 0.002 | 18.0 | **POOR** | very noisy, expect high WER |
+| recording_003.m4a | interview_44 | 1543.7 | 18.5 | -34.2 | 1.450 | 32.1 | **CLIPPED** | distortion: 1.5% clipped samples |
+
+Common options:
+
+```bash
+# Custom output path
+uv run python scripts/audio_quality_report.py /path/to/audio -o ./reports/q.xlsx
+
+# Limit to specific extensions
+uv run python scripts/audio_quality_report.py /path/to/audio --extensions .m4a .wav
+
+# Cap at first N files (for quick spot-checks)
+uv run python scripts/audio_quality_report.py /path/to/audio --max-files 50
+```
+
+##### Advanced — `test-mics` CLI (compare microphones, run with transcription)
+
+For comparing multiple microphones across the same recordings, use the
+`test-mics` CLI command which produces a comparative JSON report.
 
 **Expected folder structure** (Survey Solutions–style, same as `transcribe-folder`):
 
