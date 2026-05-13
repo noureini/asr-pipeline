@@ -242,8 +242,15 @@ SOURCES = {
 def extract_source(stream: Iterator, src_name: str, out_path: Path,
                    predict_fn, ipa_to_bengali_fn,
                    min_s: float = 1.0, max_s: float = 20.0,
-                   cap: int = -1, max_seconds: float | None = None):
-    """Stream → ZIPA → FST → JSONL. Resume-safe by id."""
+                   cap: int = -1, max_seconds: float | None = None,
+                   output_format: str = "fst"):
+    """Stream → ZIPA → JSONL. Resume-safe by id.
+
+    output_format:
+      "fst" (default) — save FST output as `noisy` field
+      "ipa"           — save space-separated IPA tokens as `ipa` field
+      "both"          — save both `ipa` and `noisy` fields
+    """
     done_ids: set[str] = set()
     if out_path.exists():
         with open(out_path, encoding="utf-8") as f:
@@ -287,19 +294,45 @@ def extract_source(stream: Iterator, src_name: str, out_path: Path,
                     n_filtered += 1
                     continue
 
-                ipa = predict_fn(wav, sr)
-                noisy = ipa_to_bengali_fn(ipa)
-                if not noisy.strip():
+                ipa_tokens = predict_fn(wav, sr)
+                if not ipa_tokens:
                     n_filtered += 1
                     continue
 
-                f.write(json.dumps({
-                    "src": item["src"],
-                    "id": sid,
-                    "noisy": noisy,
-                    "bengali": text,
-                    "english": item.get("english", ""),
-                }, ensure_ascii=False) + "\n")
+                ipa_text = " ".join(ipa_tokens)
+
+                if output_format == "ipa":
+                    record = {
+                        "src": item["src"],
+                        "id": sid,
+                        "ipa": ipa_text,
+                        "bengali": item["transcription"],
+                        "english": item.get("english", ""),
+                    }
+                elif output_format == "both":
+                    noisy = ipa_to_bengali_fn(ipa_tokens)
+                    record = {
+                        "src": item["src"],
+                        "id": sid,
+                        "ipa": ipa_text,
+                        "noisy": noisy,
+                        "bengali": item["transcription"],
+                        "english": item.get("english", ""),
+                    }
+                else:  # "fst" (default — backward compatible)
+                    noisy = ipa_to_bengali_fn(ipa_tokens)
+                    if not noisy.strip():
+                        n_filtered += 1
+                        continue
+                    record = {
+                        "src": item["src"],
+                        "id": sid,
+                        "noisy": noisy,
+                        "bengali": item["transcription"],
+                        "english": item.get("english", ""),
+                    }
+
+                f.write(json.dumps(record, ensure_ascii=False) + "\n")
                 n += 1
                 n_new += 1
 
@@ -357,6 +390,12 @@ def main():
     p.add_argument("--sknahin-wps-min", type=float, default=0.5)
     p.add_argument("--sknahin-wps-max", type=float, default=8.0)
     p.add_argument("--combined-name", default="lora_dataset_full.jsonl")
+    p.add_argument("--output-format", choices=["fst", "ipa", "both"],
+                   default="fst",
+                   help="What to save per sample: "
+                        "'fst' = Bengali script via FST (current default), "
+                        "'ipa' = space-separated IPA tokens (for IPA→LLM training), "
+                        "'both' = save both")
     args = p.parse_args()
 
     logging.basicConfig(level=logging.INFO,
@@ -406,13 +445,16 @@ def main():
             for k, v in meta.items():
                 logger.info(f"  meta.{k}: {v}")
 
-            out_path = args.output_dir / f"{src_name}.jsonl"
+            # Filename reflects the output format
+            suffix = "_ipa" if args.output_format == "ipa" else ""
+            out_path = args.output_dir / f"{src_name}{suffix}.jsonl"
             extract_source(
                 stream, src_name=src_name, out_path=out_path,
                 predict_fn=predict_fn,
                 ipa_to_bengali_fn=ipa_to_bengali_script,
                 cap=args.per_source_cap,
                 max_seconds=per_source_seconds,
+                output_format=args.output_format,
             )
         except Exception as e:
             logger.error(f"  Source {src_name} FAILED: {e}")
