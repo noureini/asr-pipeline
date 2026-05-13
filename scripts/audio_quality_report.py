@@ -221,16 +221,51 @@ def load_diarizer():
         print("  https://huggingface.co/pyannote/speaker-diarization-3.1")
         return None
 
+    # PyTorch 2.6+ defaults torch.load to weights_only=True, which rejects
+    # pyannote's checkpoint (contains TorchVersion / OmegaConf objects).
+    # Allowlist the safe ones so the load can proceed.
+    try:
+        import torch.torch_version
+        torch.serialization.add_safe_globals([torch.torch_version.TorchVersion])
+    except Exception:
+        pass
+    try:
+        from omegaconf.listconfig import ListConfig
+        from omegaconf.dictconfig import DictConfig
+        from omegaconf.base import ContainerMetadata, Metadata
+        torch.serialization.add_safe_globals(
+            [ListConfig, DictConfig, ContainerMetadata, Metadata]
+        )
+    except Exception:
+        pass
+
     try:
         pipeline = Pipeline.from_pretrained(
             "pyannote/speaker-diarization-3.1",
             use_auth_token=token,
         )
     except Exception as e:
-        print(f"ERROR loading diarization pipeline: {e}")
-        print("Make sure you accepted terms at:")
-        print("  https://huggingface.co/pyannote/speaker-diarization-3.1")
-        return None
+        # Fallback: monkey-patch torch.load to use weights_only=False for this load.
+        # Safe here because we just downloaded from a trusted HF repo we authenticated to.
+        print(f"  First load attempt failed ({type(e).__name__}); retrying with weights_only=False...")
+        _orig_load = torch.load
+        def _patched_load(*a, **kw):
+            kw.setdefault("weights_only", False)
+            return _orig_load(*a, **kw)
+        torch.load = _patched_load
+        try:
+            pipeline = Pipeline.from_pretrained(
+                "pyannote/speaker-diarization-3.1",
+                use_auth_token=token,
+            )
+        except Exception as e2:
+            print(f"ERROR loading diarization pipeline: {e2}")
+            print("Make sure you accepted terms at:")
+            print("  https://huggingface.co/pyannote/speaker-diarization-3.1")
+            torch.load = _orig_load
+            return None
+        finally:
+            torch.load = _orig_load
 
     if torch.cuda.is_available():
         pipeline = pipeline.to(torch.device("cuda"))
@@ -574,6 +609,12 @@ def main():
                    help="Also run speaker diarization and add a 'Per speaker' "
                         "sheet with ENUMERATOR/RESPONDENT roles. "
                         "Slower (~10-60s/file) and needs HF token + pyannote.audio.")
+    p.add_argument("--max-speaker-files", type=int, default=-1,
+                   help="When --with-speakers, cap diarization to first N usable "
+                        "files (-1 = all). Useful for sanity-checking on large sets.")
+    p.add_argument("--diarize-all", action="store_true",
+                   help="Diarize every file, even those flagged unusable "
+                        "(BAD/POOR/CLIPPED/MUTED/BROKEN). Default skips them.")
     args = p.parse_args()
 
     if not args.folder.exists():
@@ -616,6 +657,9 @@ def main():
     rows = []
     per_speaker_rows = []
     n_errors = 0
+    n_diarized = 0
+    n_skipped_diar = 0
+    SKIP_FLAGS = {"BAD", "POOR", "CLIPPED", "MUTED", "BROKEN", "EMPTY"}
     t0 = time.time()
     print()
     for i, path in enumerate(audio_files, 1):
@@ -639,21 +683,32 @@ def main():
             rows.append(row)
 
             # Per-speaker analysis (optional)
+            speakers_info = ""
             if diarizer is not None:
-                spk_rows = per_speaker_analysis(wav, diarizer, sr)
-                for sr_row in spk_rows:
-                    sr_row["file"] = row["file"]
-                    sr_row["folder"] = row["folder"]
-                    per_speaker_rows.append(sr_row)
-                spk_summary = ", ".join(
-                    f"{r['role']}({r['quality']})" for r in spk_rows
-                ) if spk_rows else "no speakers"
-                speakers_info = f"  speakers: {spk_summary}"
-            else:
-                speakers_info = ""
+                # Skip unusable audio unless user asked otherwise
+                if not args.diarize_all and flag in SKIP_FLAGS:
+                    n_skipped_diar += 1
+                    speakers_info = f"  diar skipped ({flag})"
+                elif (args.max_speaker_files > 0
+                      and n_diarized >= args.max_speaker_files):
+                    speakers_info = f"  diar skipped (cap {args.max_speaker_files})"
+                else:
+                    t_diar = time.time()
+                    spk_rows = per_speaker_analysis(wav, diarizer, sr)
+                    diar_elapsed = time.time() - t_diar
+                    n_diarized += 1
+                    for sr_row in spk_rows:
+                        sr_row["file"] = row["file"]
+                        sr_row["folder"] = row["folder"]
+                        per_speaker_rows.append(sr_row)
+                    spk_summary = ", ".join(
+                        f"{r['role']}({r['quality']})" for r in spk_rows
+                    ) if spk_rows else "no speakers"
+                    speakers_info = f"  speakers ({diar_elapsed:.1f}s): {spk_summary}"
 
-            # Print short progress
-            if i <= 5 or i % 10 == 0 or i == len(audio_files):
+            # Print short progress (every file in diarization mode since each is slow)
+            verbose = diarizer is not None
+            if verbose or i <= 5 or i % 10 == 0 or i == len(audio_files):
                 elapsed = time.time() - t0
                 rate = i / max(elapsed, 1e-6)
                 eta = (len(audio_files) - i) / max(rate, 1e-6)
@@ -668,6 +723,9 @@ def main():
             n_errors += 1
             print(f"  [{i:>3}/{len(audio_files)}] ERROR ({type(e).__name__}): {path.name}")
             continue
+
+    if diarizer is not None:
+        print(f"\n  Diarized: {n_diarized} files, skipped: {n_skipped_diar} (unusable)")
 
     # Write Excel
     print(f"\nWriting Excel report -> {args.output}")

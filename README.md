@@ -46,6 +46,8 @@ Before transcribing anything, run a quality assessment so you know what you're
 working with. **One command, one Excel.**
 
 ```bash
+just quality /path/to/audio/folder
+# or, without just:
 uv run python scripts/audio_quality_report.py /path/to/audio/folder
 ```
 
@@ -177,113 +179,144 @@ Omnilingual ASR handles code-switching natively through its multilingual encoder
 
 ## Prerequisites
 
-Before installing the pipeline, make sure you have:
+| Required | What | Notes |
+|---|---|---|
+| Yes | Python ≥ 3.10 | |
+| Yes | FFmpeg | for audio decoding (m4a, mp3, …) |
+| Yes (for diarization) | HuggingFace token | free, set up in [Installation step 3](#3-set-up-environment-variables-huggingface-token) |
+| Recommended | `uv` | Python env manager |
+| Recommended | `just` | task runner for the one-line workflows below |
+| Recommended | NVIDIA GPU (≥ 16 GB VRAM) | CPU works but is slow |
 
-### System Dependencies
-
-| Dependency | Required | How to Install |
-|------------|----------|----------------|
-| **Python >= 3.10** | Yes | [python.org](https://www.python.org/downloads/) or your system package manager |
-| **FFmpeg** | Yes | `sudo apt install ffmpeg` (Ubuntu/Debian) or `brew install ffmpeg` (macOS) |
-| **CUDA GPU (16GB+ VRAM)** | Recommended | NVIDIA driver + CUDA toolkit. CPU mode works but is much slower |
-| **uv** | Recommended | `curl -LsSf https://astral.sh/uv/install.sh \| sh` |
-
-### HuggingFace Token (Required for Speaker Diarization)
-
-The pyannote speaker diarization model requires a free HuggingFace token:
-
-1. Create a free account at [huggingface.co](https://huggingface.co/join)
-2. Go to [Settings > Access Tokens](https://huggingface.co/settings/tokens) and create a token
-3. Accept the model terms at:
-   - [pyannote/speaker-diarization-3.1](https://huggingface.co/pyannote/speaker-diarization-3.1)
-   - [pyannote/segmentation-3.0](https://huggingface.co/pyannote/segmentation-3.0)
-4. Set the token in your `.env` file (see [Installation](#installation) step 3)
+All exact install commands are in [Installation step 1](#1-install-system-tools-uv-just-ffmpeg).
 
 ## Installation
 
-### 1. Clone the Repository
+Follow these steps top-to-bottom on a fresh machine. After step 4 you can run
+the audio quality check; transcription needs steps 5–6 as well.
+
+### 1. Install system tools (uv, just, ffmpeg)
+
+```bash
+# uv — Python package manager
+curl -LsSf https://astral.sh/uv/install.sh | sh
+
+# just — task runner (powers all `just <recipe>` commands below)
+curl --proto '=https' --tlsv1.2 -sSf https://just.systems/install.sh \
+    | bash -s -- --to ~/.local/bin
+export PATH="$HOME/.local/bin:$PATH"   # add to ~/.bashrc to make permanent
+
+# ffmpeg — audio decoding (m4a, mp3, etc.)
+sudo apt install ffmpeg          # Ubuntu / WSL / Debian
+# brew install ffmpeg            # macOS
+# winget install ffmpeg          # Windows
+```
+
+Verify:
+
+```bash
+uv --version && just --version && ffmpeg -version | head -1
+```
+
+### 2. Clone the repository
 
 ```bash
 git clone https://github.com/<your-username>/asr-pipeline.git
 cd asr-pipeline
 ```
 
-### 2. Install Dependencies
+### 3. Set up environment variables (HuggingFace token)
 
-Using **uv** (recommended):
-
-```bash
-uv sync
-```
-
-Using **pip**:
-
-```bash
-pip install -e .
-```
-
-For NeMo MSDD diarization backend (optional):
-
-```bash
-pip install -e ".[nemo]"
-```
-
-For development tools (pytest, ruff, mypy):
-
-```bash
-uv sync --extra dev
-# or
-pip install -e ".[dev]"
-```
-
-### 3. Set Up Environment Variables
+Needed for speaker diarization (Step 0 `--with-speakers`, and Step 1 transcription).
+The basic per-file audio quality check works **without** a token.
 
 ```bash
 cp .env.example .env
+# edit .env and set HF_TOKEN=hf_abc123...
 ```
 
-Edit `.env` and replace `hf_your_token_here` with your actual HuggingFace token:
+Get a free token at [huggingface.co/settings/tokens](https://huggingface.co/settings/tokens),
+then accept the model terms at
+[pyannote/speaker-diarization-3.1](https://huggingface.co/pyannote/speaker-diarization-3.1)
+and [pyannote/segmentation-3.0](https://huggingface.co/pyannote/segmentation-3.0).
 
-```
-HF_TOKEN=hf_abc123...
-```
-
-### 4. Set Up Translation Models
-
-**Option A: TranslateGemma (default, recommended)**
-
-No manual setup needed. The model auto-downloads from HuggingFace on first transcription run (~3 GB download).
+### 4. Install Python dependencies for audio quality
 
 ```bash
-# Verify your environment is ready
-uv run asr-pipeline setup
+just setup-quality
+# equivalent to: uv sync, then verify ffmpeg + HF token
 ```
 
-**Option B: CT2 NLLB + Ollama (legacy)**
-
-This uses CTranslate2 NLLB-200 for translation and Ollama for LLM refinement:
+You can now run the audio quality check:
 
 ```bash
-# Install and start Ollama
-curl -fsSL https://ollama.ai/install.sh | sh
-ollama serve  # in a separate terminal
+just quality /path/to/audio/folder              # per-file
+just quality-speakers /path/to/audio/folder     # + per-speaker (ENUMERATOR/RESPONDENT)
+```
 
-# Run the setup command
+### 5. (Optional) Download transcription models
+
+Only needed if you want to run the ASR / translation pipeline (Step 1 onward).
+
+```bash
+just setup-transcribe
+# equivalent to: uv run asr-pipeline setup --skip-ollama
+```
+
+This downloads Whisper Large-v3, Omnilingual CTC, MMS-FA alignment, and NLLB-200
+translation weights into `~/.asr-pipeline/models` (~15 GB).
+
+### 6. (Optional) LLM correction / refinement via Ollama
+
+```bash
+just setup-llm
+# equivalent to: pulls qwen2.5:7b via ollama (~4.7 GB)
+```
+
+Requires [Ollama](https://ollama.com) installed and running.
+
+### One-shot install (everything)
+
+If you want all three paths at once:
+
+```bash
+just setup
+```
+
+### Extras
+
+| Extra | Install | When you need it |
+|-------|---------|------------------|
+| NeMo MSDD diarization (alternative to pyannote) | `uv sync --extra nemo` | Only if pyannote doesn't fit your hardware constraints |
+| Dev tools (pytest, ruff, mypy) | `uv sync --extra dev` | Contributing code |
+
+### Without `just` (raw commands)
+
+Everything `just` does is just a wrapper. If you don't want to install `just`:
+
+| Recipe | Raw equivalent |
+|--------|----------------|
+| `just setup-quality` | `uv sync` |
+| `just quality FOLDER` | `uv run python scripts/audio_quality_report.py FOLDER` |
+| `just quality-speakers FOLDER` | `uv run python scripts/audio_quality_report.py FOLDER --with-speakers` |
+| `just setup-transcribe` | `uv run asr-pipeline setup --skip-ollama` |
+| `just transcribe FILE bn` | `uv run asr-pipeline transcribe FILE --language bn` |
+
+### Verify everything is wired up
+
+```bash
+just gpu                          # shows CUDA availability
+uv run asr-pipeline check-deps    # full dependency / model status table
+```
+
+### Translation backends
+
+The default backend (TranslateGemma 4B) auto-downloads on first transcription run.
+For the legacy CT2 NLLB + Ollama backend instead, use:
+
+```bash
 uv run asr-pipeline setup --translation-backend ct2_nllb
 ```
-
-This will:
-1. Pull the Ollama LLM model (default: `qwen2.5:1.5b`)
-2. Convert NLLB-200 to CTranslate2 format
-3. Update the config with model paths
-
-### 5. Verify Installation
-
-```bash
-uv run asr-pipeline check-deps
-```
-
-This prints a table showing the status of all required dependencies, GPU availability, and installed packages.
 
 ## Configuration
 
@@ -430,26 +463,9 @@ uv run asr-pipeline setup --translation-backend ct2_nllb
 
 #### Audio Quality Assessment
 
-##### Quick path — one command, one Excel (recommended)
-
-Point at a folder of recordings, get a color-coded Excel report. No setup,
-no mapping files, no language flag.
-
-```bash
-uv run python scripts/audio_quality_report.py /path/to/audio/folder
-```
-
-That's it. The script will:
-
-1. Walk the folder recursively for audio files (`.m4a`, `.wav`, `.mp3`, `.flac`, etc.)
-2. Compute acoustic metrics per file (SNR, RMS, clipping %, speech %, peak level, duration)
-3. Classify each file with a 10-tier quality system + a 0-100 score
-4. Write `quality_report.xlsx` to the folder, with:
-   - One row per file
-   - Color-coded `quality` column
-   - 0-100 `score` column (sortable to find the worst recordings fast)
-   - Auto-filter on the header row
-   - Summary footer (distribution + averages)
+The basic command is shown in [Step 0 of the walkthrough](#step-0--audio-quality-check).
+The sections below document the **quality flag taxonomy** and the **advanced
+`test-mics` CLI** for comparing microphones.
 
 ##### Quality flags
 
