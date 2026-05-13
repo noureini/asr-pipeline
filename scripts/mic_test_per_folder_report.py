@@ -17,6 +17,7 @@ from __future__ import annotations
 import argparse
 import json
 import statistics as stats
+from datetime import datetime
 from pathlib import Path
 
 import matplotlib.pyplot as plt
@@ -408,6 +409,19 @@ def main() -> None:
     file_csv = out_dir / "per-file-report.csv"
     png_path = out_dir / "per-folder-report.png"
     xlsx_path = out_dir / "per-folder-report.xlsx"
+
+    # Excel may be open in another app, locking the file. Fall back to a
+    # timestamped filename if the primary one isn't writable.
+    def _writable(p: Path) -> bool:
+        try:
+            with p.open("a"):
+                return True
+        except Exception:
+            return False
+    if xlsx_path.exists() and not _writable(xlsx_path):
+        ts = datetime.now().strftime("%H%M%S")
+        xlsx_path = out_dir / f"per-folder-report-{ts}.xlsx"
+        print(f"Note: original xlsx is locked; writing to {xlsx_path.name}")
 
     title = (
         f"Audio Quality by Folder — {report.get('language', '?')} — "

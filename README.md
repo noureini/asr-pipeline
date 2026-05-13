@@ -11,6 +11,7 @@ Supports **1,600+ languages** through a two-tier engine architecture that routes
 - [Installation](#installation)
 - [Configuration](#configuration)
 - [Usage](#usage)
+- [LoRA Fine-Tuning Experiments](#lora-fine-tuning-experiments)
 - [Testing](#testing)
 - [Project Structure](#project-structure)
 - [Supported Languages](#supported-languages)
@@ -449,6 +450,72 @@ for seg in result.segments:
     print(f"[{seg.speaker_id}] {seg.corrected_text}")
     print(f"  -> {seg.refined_translation}")
 ```
+
+## LoRA Fine-Tuning Experiments
+
+Beyond the core ASR pipeline, the repo contains scripts for fine-tuning LLMs
+to correct noisy phoneme-based transcriptions. Use these when the lattice +
+post-processing baseline isn't accurate enough for your target language.
+
+### Pipeline overview
+
+```
+Audio → ZIPA (universal phoneme model) → IPA tokens → FST → noisy Bengali
+                                                   ↘
+                                       (alternative: skip FST,
+                                        feed IPA directly to LLM)
+                                                       ↓
+                                         LoRA-fine-tuned LLM
+                                                       ↓
+                                                 clean Bengali
+```
+
+### Workflow scripts
+
+| Stage | Script | Purpose |
+|---|---|---|
+| **Build dataset** | `scripts/extract_ipa_local.py` | Stream FLEURS/Bengali_AI_Speech/banspeech/SKNahin, run ZIPA, save IPA + Bengali (+English) pairs as JSONL. Stratified per source. Resume-safe. |
+| | `scripts/build_lora_dataset_remote.py` | Same as above but with `--output-format` flag for FST vs IPA vs both. For remote compute / GitHub-clone workflow. |
+| | `scripts/split_ipa_dataset.py` | Stratified train/val split by (source, subsource) — eval set spans all distributions equally. |
+| **Train** | `scripts/train_lora_ipa_local.py` | LoRA fine-tune a small LLM (Qwen2.5-1.5B/3B by default) locally on RTX 3060-class GPU. Outputs adapter + GGUF. |
+| | `scripts/train_lora_remote.py` | Same training but configurable for 16-24GB GPU boxes (rented A10/A100). |
+| | `scripts/train_lora_corrector.py` | Original FST-input variant (Unsloth-canonical, uses chat template). |
+| **Evaluate** | `scripts/test_lora_local.py` | Run a trained GGUF on held-out eval samples, report CER per source. |
+| | `scripts/compare_lora_vs_baseline.py` | Apples-to-apples: compare LoRA output vs your prior lattice/Gemma baselines on the same FLEURS test samples. |
+| | `scripts/compare_lora_chain_strategies.py` | Test 3 LoRA input strategies (raw FST / lattice top-1 / Gemma-corrected) to find the optimal pipeline. |
+| | `scripts/test_lora_translation.py` | Test BN→EN translation capability of the trained model (two-pass vs combined prompt). |
+| | `scripts/test_banglallama_zeroshot.py` | Zero-shot baseline using BanglaLlama 3.1 8B for comparison. |
+| | `scripts/eval_lora_corrector.py` | Streaming eval on FLEURS test (CER, WER, per-source breakdown). |
+| **Orchestration** | `scripts/run_lora_pipeline.sh` | End-to-end on a remote box: dataset build → training → GGUF export. Single command. |
+
+### Quick start — local laptop (RTX 3060+)
+
+```bash
+# 1. Extract dataset with IPA tokens (~3-5h with cached audio)
+export HF_TOKEN=hf_xxxx   # or place in .env file at repo root
+uv run python scripts/extract_ipa_local.py \
+    --output-dir ./lora_data_ipa \
+    --max-hours-sknahin 4
+
+# 2. Stratified train/val split (5 sec)
+# (already done by extract_ipa_local.py)
+
+# 3. Train LoRA (30-60 min on RTX 3060)
+uv run python scripts/train_lora_ipa_local.py \
+    --train ./lora_data_ipa/lora_dataset_full_ipa_train.jsonl \
+    --val   ./lora_data_ipa/lora_dataset_full_ipa_val.jsonl
+
+# 4. Evaluate
+uv run python scripts/compare_lora_vs_baseline.py \
+    --gguf models/qwen_ipa_lora/gguf/*.gguf \
+    --baseline-json results/baseline_merged.json
+```
+
+### Documentation
+
+See `scripts/README_lora_remote.md` for the remote-compute workflow and detailed
+explanations of dataset diversity strategies, quality filters, and hyperparameter
+choices.
 
 ## Testing
 
