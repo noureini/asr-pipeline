@@ -125,23 +125,49 @@ def main():
     tok = _load_hf_token()
     print(f"HF token: {'found' if tok else 'NOT found (public dataset, ok)'}")
     print(f"Loading FLEURS {FLEURS_BN} [{args.split}] (streaming)...")
+
+    ds = None
+    errors = []
+
+    # Attempt 1: parquet mirror (NO trust_remote_code -> no torchaudio
+    # import -> no libcudnn dependency). Works on datasets>=2.18 since
+    # google/fleurs was converted to parquet.
     try:
         ds = load_dataset(
             "google/fleurs", FLEURS_BN,
             split=args.split, streaming=True,
-            trust_remote_code=True,
             token=tok,
         )
-        # Disable datasets' built-in audio decoding (which drags in
-        # torchcodec -> libcudnn). We decode the raw bytes with
-        # soundfile ourselves below — no torch needed.
-        ds = ds.cast_column("audio", Audio(decode=False))
+        print("  loaded via parquet (no remote code)")
     except Exception as e:
-        print(f"ERROR loading FLEURS: {e}")
-        print("If auth error: set HF_TOKEN in .env or environment.")
-        print("If libcudnn error persists: the venv's nvidia-cudnn-cu12 "
-              "may be missing — run `uv sync`.")
+        errors.append(f"parquet path: {e}")
+
+    # Attempt 2: legacy loader script (needs torchaudio -> libcudnn).
+    if ds is None:
+        try:
+            ds = load_dataset(
+                "google/fleurs", FLEURS_BN,
+                split=args.split, streaming=True,
+                trust_remote_code=True, token=tok,
+            )
+            print("  loaded via legacy loader script")
+        except Exception as e:
+            errors.append(f"remote-code path: {e}")
+
+    if ds is None:
+        print("ERROR loading FLEURS. Tried both paths:")
+        for er in errors:
+            print(f"  - {er}")
+        print("\nFix: uv pip install nvidia-cudnn-cu12   "
+              "(then re-run; the script auto-adds it to LD_LIBRARY_PATH)")
         sys.exit(1)
+
+    # Don't let datasets decode audio (torchcodec -> libcudnn). We parse
+    # raw bytes with soundfile ourselves below.
+    try:
+        ds = ds.cast_column("audio", Audio(decode=False))
+    except Exception:
+        pass  # some versions already give undecoded dicts in streaming
 
     audio_dir = args.out / "audio"
     audio_dir.mkdir(parents=True, exist_ok=True)
