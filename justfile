@@ -98,6 +98,18 @@ phys-build:
 phys-diagnose:
     uv run python scripts/test_phys_lattice_recall.py --diagnose
 
+# Build a Bengali-ONLY index (filters out CMUDict English entries)
+phys-build-bn:
+    uv run python scripts/test_phys_lattice_recall.py --build --bengali-only
+
+# Recall@K on Bengali-only dict — clean (sanity)
+phys-recall-bn-clean n="500":
+    uv run python scripts/test_phys_lattice_recall.py --bengali-only --mode clean --n {{n}}
+
+# Recall@K on Bengali-only dict — synthetic noise (the decisive number)
+phys-recall-bn n="500":
+    uv run python scripts/test_phys_lattice_recall.py --bengali-only --mode noisy --n {{n}}
+
 # Recall@K sanity check — clean IPA (should be ~100%)
 phys-recall-clean n="500":
     uv run python scripts/test_phys_lattice_recall.py --mode clean --n {{n}}

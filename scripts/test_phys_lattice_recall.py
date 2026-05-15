@@ -76,8 +76,14 @@ import numpy as np
 
 
 CACHE_DIR = Path.home() / ".asr-pipeline" / "phys_lattice"
-CACHE_INDEX = CACHE_DIR / "ipa_dict_index.pkl"
+CACHE_INDEX_FULL = CACHE_DIR / "ipa_dict_index.pkl"
+CACHE_INDEX_BN = CACHE_DIR / "ipa_dict_index_bn.pkl"
 P2G_TSV_DIR = Path.home() / ".asr-pipeline" / "p2g"
+
+
+def is_bengali_word(w: str) -> bool:
+    """True iff the word contains at least one Bengali codepoint."""
+    return any('ঀ' <= c <= '৿' for c in w)
 
 
 # ─── Panphon wrapper ─────────────────────────────────────────────────────
@@ -258,6 +264,7 @@ class IPAIndex:
 def build_from_tsv(fs: FeatureSpace, tsv_dir: Path,
                    include_globs: tuple[str, ...] = ("*.tsv",),
                    exclude_files: tuple[str, ...] = ("word_frequencies.tsv",),
+                   bengali_only: bool = False,
                    max_words: int = -1) -> IPAIndex:
     """Build IPA index from existing TSV lexicons in ~/.asr-pipeline/p2g/.
 
@@ -284,9 +291,11 @@ def build_from_tsv(fs: FeatureSpace, tsv_dir: Path,
         print(f"ERROR: no .tsv files in {tsv_dir}")
         sys.exit(1)
 
-    print(f"Loading {len(tsv_files)} TSV lexicon(s) from {tsv_dir}:")
+    print(f"Loading {len(tsv_files)} TSV lexicon(s) from {tsv_dir}"
+          + (" [Bengali only]" if bengali_only else "") + ":")
     seen: set[tuple[str, str]] = set()
     pairs: list[tuple[str, str]] = []
+    n_skipped_lang = 0
     for tsv_path in sorted(tsv_files):
         n_file = 0
         with open(tsv_path, encoding="utf-8") as f:
@@ -297,6 +306,9 @@ def build_from_tsv(fs: FeatureSpace, tsv_dir: Path,
                 word, ipa = row[0].strip(), row[1].strip()
                 if not word or not ipa:
                     continue
+                if bengali_only and not is_bengali_word(word):
+                    n_skipped_lang += 1
+                    continue
                 key = (word, ipa)
                 if key in seen:
                     continue
@@ -304,6 +316,8 @@ def build_from_tsv(fs: FeatureSpace, tsv_dir: Path,
                 pairs.append(key)
                 n_file += 1
         print(f"  {tsv_path.name:<40} +{n_file} entries")
+    if bengali_only and n_skipped_lang:
+        print(f"  ({n_skipped_lang} non-Bengali entries filtered out)")
 
     print(f"  Total unique (word, ipa) pairs: {len(pairs)}")
     if max_words > 0:
@@ -662,6 +676,10 @@ def main():
                         "pip packages.")
     p.add_argument("--tsv-dir", type=Path, default=P2G_TSV_DIR,
                    help=f"Directory of word-tab-ipa TSVs (default: {P2G_TSV_DIR})")
+    p.add_argument("--bengali-only", action="store_true",
+                   help="Filter dictionary to entries containing Bengali "
+                        "characters (drops CMUDict English). Uses a separate "
+                        "cache file so toggling doesn't clobber the full index.")
     p.add_argument("--max-words", type=int, default=-1,
                    help="Cap dict size while building (debug only)")
 
@@ -688,16 +706,19 @@ def main():
         return
 
     # ─── Load or build the dictionary index ───────────────────────────
-    if args.build or not CACHE_INDEX.exists():
-        if not args.build and not CACHE_INDEX.exists():
-            print(f"No cached index at {CACHE_INDEX} — building now.")
+    cache_path = CACHE_INDEX_BN if args.bengali_only else CACHE_INDEX_FULL
+    if args.build or not cache_path.exists():
+        if not args.build and not cache_path.exists():
+            print(f"No cached index at {cache_path} — building now.")
         if args.source == "tsv":
-            idx = build_from_tsv(fs, args.tsv_dir, max_words=args.max_words)
+            idx = build_from_tsv(fs, args.tsv_dir,
+                                 bengali_only=args.bengali_only,
+                                 max_words=args.max_words)
         else:
             idx = build_from_bangla_ipa(fs, max_words=args.max_words)
-        save_index(idx, CACHE_INDEX)
+        save_index(idx, cache_path)
     else:
-        idx = load_index(CACHE_INDEX)
+        idx = load_index(cache_path)
 
     if len(idx) == 0:
         print("ERROR: empty index. Aborting.")
