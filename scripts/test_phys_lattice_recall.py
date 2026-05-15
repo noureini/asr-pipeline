@@ -31,21 +31,28 @@ Pipeline:
     4. Report recall@1, @5, @10, @32, @100
 
 Usage:
-    # First run (downloads bangla-ipa, builds index, ~1 min)
+    # 0. Make sure the P2G TSV lexicons exist (one-time, reuses existing
+    #    pipeline). This builds Epitran + WikiPron + CMUDict TSVs in
+    #    ~/.asr-pipeline/p2g/.
+    uv run python scripts/build_p2g_dictionaries.py
+    # (or, for the bigger bangla-academy dict:
+    #  uv run python scripts/build_proper_bengali_dictionary.py)
+
+    # 1. Build the panphon-feature index over those TSVs (~1 min)
     uv run python scripts/test_phys_lattice_recall.py --build
 
-    # Sanity check: clean recall (should be ~100%)
+    # 2. Sanity check: clean recall (should be ~100%)
     uv run python scripts/test_phys_lattice_recall.py --mode clean --n 500
 
-    # Real test: synthetic ZIPA-like noise (this is the decisive number)
+    # 3. Real test: synthetic ZIPA-like noise (the decisive number)
     uv run python scripts/test_phys_lattice_recall.py --mode noisy --n 500
 
-    # Test on your own (gold_word, zipa_ipa) pairs
+    # 4. Test on your own (gold_word, zipa_ipa) pairs
     uv run python scripts/test_phys_lattice_recall.py \
         --mode jsonl --test-jsonl ./my_zipa_outputs.jsonl --n 500
 
-    # Restrict to common words (filters dict by min character length)
-    uv run python scripts/test_phys_lattice_recall.py --mode noisy --min-len 3
+    # Alternative source — rebuild from the bangla-dictionary pip packages
+    uv run python scripts/test_phys_lattice_recall.py --build --source bangla-pkg
 
 JSONL test format (one obj per line):
     {"word": "কফির", "gold_ipa": "kɔpir", "noisy_ipa": "kobir"}
@@ -70,6 +77,7 @@ import numpy as np
 
 CACHE_DIR = Path.home() / ".asr-pipeline" / "phys_lattice"
 CACHE_INDEX = CACHE_DIR / "ipa_dict_index.pkl"
+P2G_TSV_DIR = Path.home() / ".asr-pipeline" / "p2g"
 
 
 # ─── Panphon wrapper ─────────────────────────────────────────────────────
@@ -210,6 +218,85 @@ class IPAIndex:
 
 
 # ─── Dictionary builders ────────────────────────────────────────────────
+
+def build_from_tsv(fs: FeatureSpace, tsv_dir: Path,
+                   include_globs: tuple[str, ...] = ("*.tsv",),
+                   exclude_files: tuple[str, ...] = ("word_frequencies.tsv",),
+                   max_words: int = -1) -> IPAIndex:
+    """Build IPA index from existing TSV lexicons in ~/.asr-pipeline/p2g/.
+
+    Format: each .tsv file has lines of `word\\tipa` (the standard format
+    produced by scripts/build_p2g_dictionaries.py and
+    scripts/build_proper_bengali_dictionary.py).
+
+    Combines all TSVs in the directory (Epitran + WikiPron + bangla-ipa +
+    everyday lexicon, etc.) and de-duplicates by (word, ipa).
+    """
+    import csv as _csv
+    if not tsv_dir.exists():
+        print(f"ERROR: TSV dir not found: {tsv_dir}")
+        print("Build it first with one of:")
+        print("  uv run python scripts/build_p2g_dictionaries.py")
+        print("  uv run python scripts/build_proper_bengali_dictionary.py")
+        sys.exit(1)
+
+    tsv_files = []
+    for g in include_globs:
+        tsv_files.extend(tsv_dir.glob(g))
+    tsv_files = [p for p in tsv_files if p.name not in exclude_files]
+    if not tsv_files:
+        print(f"ERROR: no .tsv files in {tsv_dir}")
+        sys.exit(1)
+
+    print(f"Loading {len(tsv_files)} TSV lexicon(s) from {tsv_dir}:")
+    seen: set[tuple[str, str]] = set()
+    pairs: list[tuple[str, str]] = []
+    for tsv_path in sorted(tsv_files):
+        n_file = 0
+        with open(tsv_path, encoding="utf-8") as f:
+            reader = _csv.reader(f, delimiter="\t")
+            for row in reader:
+                if len(row) < 2:
+                    continue
+                word, ipa = row[0].strip(), row[1].strip()
+                if not word or not ipa:
+                    continue
+                key = (word, ipa)
+                if key in seen:
+                    continue
+                seen.add(key)
+                pairs.append(key)
+                n_file += 1
+        print(f"  {tsv_path.name:<40} +{n_file} entries")
+
+    print(f"  Total unique (word, ipa) pairs: {len(pairs)}")
+    if max_words > 0:
+        pairs = pairs[:max_words]
+
+    idx = IPAIndex()
+    n_failed = 0
+    t0 = time.time()
+    for i, (w, ipa) in enumerate(pairs):
+        try:
+            feats = fs.segment(ipa)
+            if not feats:
+                n_failed += 1
+                continue
+            first = fs.first_phone(ipa)
+            idx.add(w, ipa, feats, first)
+        except Exception:
+            n_failed += 1
+            continue
+        if (i + 1) % 10000 == 0:
+            rate = (i + 1) / (time.time() - t0)
+            print(f"  [{i + 1}/{len(pairs)}] indexed={len(idx)} "
+                  f"failed={n_failed} ({rate:.0f} pairs/s)")
+
+    print(f"\nBuilt index: {len(idx)} entries "
+          f"({n_failed} failed panphon segmentation)")
+    print(f"Bucket count: {len(idx.buckets)} unique first-phones")
+    return idx
+
 
 def build_from_bangla_ipa(fs: FeatureSpace, max_words: int = -1) -> IPAIndex:
     """Build IPA index from the bangla-ipa pip package + bangla-dictionary."""
@@ -480,6 +567,14 @@ def main():
     )
     p.add_argument("--build", action="store_true",
                    help="Build the IPA dictionary index (one-time, ~1 min)")
+    p.add_argument("--source", choices=["tsv", "bangla-pkg"], default="tsv",
+                   help="Where to read the lexicon from. 'tsv' (default) reads "
+                        "all *.tsv files in --tsv-dir (the format produced by "
+                        "scripts/build_p2g_dictionaries.py). 'bangla-pkg' "
+                        "rebuilds from the bangla-dictionary + bangla-ipa "
+                        "pip packages.")
+    p.add_argument("--tsv-dir", type=Path, default=P2G_TSV_DIR,
+                   help=f"Directory of word-tab-ipa TSVs (default: {P2G_TSV_DIR})")
     p.add_argument("--max-words", type=int, default=-1,
                    help="Cap dict size while building (debug only)")
 
@@ -504,7 +599,10 @@ def main():
     if args.build or not CACHE_INDEX.exists():
         if not args.build and not CACHE_INDEX.exists():
             print(f"No cached index at {CACHE_INDEX} — building now.")
-        idx = build_from_bangla_ipa(fs, max_words=args.max_words)
+        if args.source == "tsv":
+            idx = build_from_tsv(fs, args.tsv_dir, max_words=args.max_words)
+        else:
+            idx = build_from_bangla_ipa(fs, max_words=args.max_words)
         save_index(idx, CACHE_INDEX)
     else:
         idx = load_index(CACHE_INDEX)

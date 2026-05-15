@@ -86,7 +86,11 @@ transcribe-folder folder lang="bn" *flags:
 
 # ─── Research experiments ─────────────────────────────────────────────────
 
-# Build the IPA dictionary index (one-time, ~1 min)
+# Step A: build the P2G TSV lexicons (Epitran + WikiPron + CMUDict)
+phys-build-lexicon:
+    uv run python scripts/build_p2g_dictionaries.py
+
+# Step B: build the panphon-feature index over the TSVs (~1 min)
 phys-build:
     uv run python scripts/test_phys_lattice_recall.py --build
 
