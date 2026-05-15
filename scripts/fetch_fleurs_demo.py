@@ -113,61 +113,79 @@ def main():
     args = p.parse_args()
 
     try:
-        from datasets import load_dataset, Audio
+        from huggingface_hub import HfApi, hf_hub_download
+        import pyarrow.parquet as pq
         import soundfile as sf
         import numpy as np
         import io
     except ImportError as e:
         print(f"ERROR: missing dependency ({e}).")
-        print("These ship with the project: uv sync")
+        print("Need: huggingface_hub, pyarrow, soundfile, numpy (uv sync)")
         sys.exit(1)
 
     tok = _load_hf_token()
     print(f"HF token: {'found' if tok else 'NOT found (public dataset, ok)'}")
-    print(f"Loading FLEURS {FLEURS_BN} [{args.split}] (streaming)...")
+    print(f"Fetching FLEURS {FLEURS_BN} [{args.split}] via parquet "
+          f"(no datasets/torch)...")
 
-    ds = None
-    errors = []
-
-    # Attempt 1: parquet mirror (NO trust_remote_code -> no torchaudio
-    # import -> no libcudnn dependency). Works on datasets>=2.18 since
-    # google/fleurs was converted to parquet.
+    # FLEURS auto-converted parquet lives on the refs/convert/parquet ref.
+    # Layout: <config>/<split>/0000.parquet  (split dir name varies:
+    # validation may be 'validation' or 'dev').
+    api = HfApi()
     try:
-        ds = load_dataset(
-            "google/fleurs", FLEURS_BN,
-            split=args.split, streaming=True,
-            token=tok,
+        all_files = api.list_repo_files(
+            "google/fleurs", repo_type="dataset",
+            revision="refs/convert/parquet", token=tok,
         )
-        print("  loaded via parquet (no remote code)")
     except Exception as e:
-        errors.append(f"parquet path: {e}")
-
-    # Attempt 2: legacy loader script (needs torchaudio -> libcudnn).
-    if ds is None:
-        try:
-            ds = load_dataset(
-                "google/fleurs", FLEURS_BN,
-                split=args.split, streaming=True,
-                trust_remote_code=True, token=tok,
-            )
-            print("  loaded via legacy loader script")
-        except Exception as e:
-            errors.append(f"remote-code path: {e}")
-
-    if ds is None:
-        print("ERROR loading FLEURS. Tried both paths:")
-        for er in errors:
-            print(f"  - {er}")
-        print("\nFix: uv pip install nvidia-cudnn-cu12   "
-              "(then re-run; the script auto-adds it to LD_LIBRARY_PATH)")
+        print(f"ERROR listing parquet files: {e}")
         sys.exit(1)
 
-    # Don't let datasets decode audio (torchcodec -> libcudnn). We parse
-    # raw bytes with soundfile ourselves below.
-    try:
-        ds = ds.cast_column("audio", Audio(decode=False))
-    except Exception:
-        pass  # some versions already give undecoded dicts in streaming
+    split_aliases = {
+        "validation": ("validation", "dev"),
+        "test": ("test",),
+        "train": ("train",),
+    }[args.split]
+
+    parquet_files = [
+        f for f in all_files
+        if f.startswith(f"{FLEURS_BN}/")
+        and f.endswith(".parquet")
+        and any(f"/{a}/" in f or f"/{a}-" in f for a in split_aliases)
+    ]
+    if not parquet_files:
+        # Fallback: any parquet under the config, filter by name token
+        parquet_files = [
+            f for f in all_files
+            if f.startswith(f"{FLEURS_BN}/") and f.endswith(".parquet")
+            and any(a in f for a in split_aliases)
+        ]
+    if not parquet_files:
+        print(f"ERROR: no parquet files found for {FLEURS_BN}/{args.split}.")
+        print("Sample of available files:")
+        for f in [x for x in all_files if x.startswith(FLEURS_BN)][:10]:
+            print(f"  {f}")
+        sys.exit(1)
+
+    parquet_files.sort()
+    print(f"  {len(parquet_files)} parquet shard(s); "
+          f"reading {parquet_files[0]}")
+
+    local_pq = hf_hub_download(
+        "google/fleurs", parquet_files[0],
+        repo_type="dataset", revision="refs/convert/parquet", token=tok,
+    )
+    table = pq.read_table(local_pq)
+    cols = table.column_names
+    # Resolve column names defensively across FLEURS parquet versions
+    audio_col = "audio" if "audio" in cols else None
+    tr_col = ("transcription" if "transcription" in cols
+              else "raw_transcription" if "raw_transcription" in cols
+              else None)
+    id_col = "id" if "id" in cols else None
+    if audio_col is None or tr_col is None:
+        print(f"ERROR: unexpected parquet schema. Columns: {cols}")
+        sys.exit(1)
 
     audio_dir = args.out / "audio"
     audio_dir.mkdir(parents=True, exist_ok=True)
@@ -175,30 +193,32 @@ def main():
     references = []
     n_saved = 0
     n_seen = 0
-    # Stream, skip out-of-duration clips, take the first N that qualify.
-    # Streaming + seed-free is fine here — we just need 10 representative
-    # clips, not a statistically random draw.
-    for ex in ds:
+    n_rows = table.num_rows
+    audio_data = table.column(audio_col).to_pylist()
+    tr_data = table.column(tr_col).to_pylist()
+    id_data = table.column(id_col).to_pylist() if id_col else [None] * n_rows
+
+    for row in range(n_rows):
         n_seen += 1
         if n_saved >= args.n:
             break
-        audio = ex.get("audio")
-        transcript = (ex.get("transcription")
-                      or ex.get("raw_transcription") or "").strip()
-        if audio is None or not transcript:
+        transcript = (tr_data[row] or "").strip()
+        a = audio_data[row]
+        if not transcript or a is None:
             continue
-        # decode=False -> audio is {"bytes": ..., "path": ...}
+        # parquet 'audio' is a struct: {'bytes': b'...', 'path': '...'}
+        raw = a.get("bytes") if isinstance(a, dict) else None
+        path = a.get("path") if isinstance(a, dict) else None
         try:
-            if audio.get("bytes"):
-                wav, sr = sf.read(io.BytesIO(audio["bytes"]), dtype="float32")
-            elif audio.get("path"):
-                wav, sr = sf.read(audio["path"], dtype="float32")
+            if raw:
+                wav, sr = sf.read(io.BytesIO(raw), dtype="float32")
+            elif path:
+                wav, sr = sf.read(path, dtype="float32")
             else:
                 continue
         except Exception as e:
             print(f"  skip (decode error: {e})")
             continue
-        # Stereo -> mono
         if wav.ndim > 1:
             wav = wav.mean(axis=1)
         wav = np.asarray(wav, dtype="float32")
@@ -209,12 +229,11 @@ def main():
 
         n_saved += 1
         fname = f"{n_saved:04d}.wav"
-        # FLEURS is already 16 kHz mono; write as-is.
         sf.write(str(audio_dir / fname), wav, sr, subtype="PCM_16")
         references.append({
             "file": fname,
             "transcript": transcript,
-            "id": int(ex.get("id", -1)),
+            "id": int(id_data[row]) if id_data[row] is not None else -1,
             "duration_s": round(dur, 2),
             "split": args.split,
             "lang": "bn",
