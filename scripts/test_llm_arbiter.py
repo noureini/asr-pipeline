@@ -95,7 +95,8 @@ def parse_llm_response(text: str, n_candidates: int) -> int | None:
 
 def call_ollama(model: str, system: str, user: str,
                 temperature: float = 0.0, num_predict: int = 8) -> str:
-    """Single chat call. Low temp + short num_predict for crisp picks."""
+    """Single chat call via Ollama daemon. Low temp + short num_predict
+    for crisp picks."""
     try:
         import ollama
     except ImportError:
@@ -116,6 +117,51 @@ def call_ollama(model: str, system: str, user: str,
         return ""
 
 
+class LlamaCppBackend:
+    """Local GGUF inference via llama-cpp-python. One-shot init, then
+    .chat() per query. Persistent across queries (no daemon needed)."""
+
+    def __init__(self, model_path: Path, n_gpu_layers: int = -1,
+                 n_ctx: int = 4096, n_threads: int = 8):
+        try:
+            from llama_cpp import Llama
+        except ImportError:
+            print("ERROR: llama-cpp-python not installed.")
+            print("  CPU only:  uv pip install llama-cpp-python")
+            print("  CUDA:      CMAKE_ARGS='-DGGML_CUDA=on' "
+                  "uv pip install llama-cpp-python --upgrade --force-reinstall --no-cache-dir")
+            sys.exit(1)
+        if not model_path.exists():
+            print(f"ERROR: GGUF not found at {model_path}")
+            sys.exit(1)
+        print(f"Loading {model_path.name} (n_gpu_layers={n_gpu_layers})...")
+        t0 = time.time()
+        self.llm = Llama(
+            model_path=str(model_path),
+            n_ctx=n_ctx,
+            n_threads=n_threads,
+            n_gpu_layers=n_gpu_layers,
+            verbose=False,
+        )
+        print(f"  loaded in {time.time() - t0:.1f}s")
+
+    def chat(self, system: str, user: str,
+             temperature: float = 0.0, max_tokens: int = 8) -> str:
+        try:
+            resp = self.llm.create_chat_completion(
+                messages=[
+                    {"role": "system", "content": system},
+                    {"role": "user", "content": user},
+                ],
+                temperature=temperature,
+                max_tokens=max_tokens,
+            )
+            return resp["choices"][0]["message"]["content"]
+        except Exception as e:
+            print(f"  llama-cpp error: {e}")
+            return ""
+
+
 def main():
     p = argparse.ArgumentParser(
         description=__doc__,
@@ -127,8 +173,18 @@ def main():
                         "Higher = better recall ceiling but slower / more "
                         "tokens. Top-100 from v3 has ~91% recall, but the "
                         "LLM gets confused by long lists.")
+    p.add_argument("--backend", choices=["llama-cpp", "ollama"],
+                   default="llama-cpp",
+                   help="llama-cpp loads a local GGUF (no daemon). "
+                        "ollama uses the running Ollama daemon.")
+    p.add_argument("--gguf", type=Path,
+                   default=Path("models/aya-expanse-8b.Q4_K_M.gguf"),
+                   help="Path to GGUF (used when --backend llama-cpp). "
+                        "Default: the Aya 8B you already have.")
+    p.add_argument("--n-gpu-layers", type=int, default=-1,
+                   help="Layers to offload to GPU. -1 = all, 0 = CPU only.")
     p.add_argument("--model", default="qwen2.5:7b",
-                   help="Ollama model tag (default qwen2.5:7b)")
+                   help="Ollama model tag (used when --backend ollama)")
     p.add_argument("--bengali-only", action="store_true", default=True,
                    help="Use BN-only physics index (default True)")
     p.add_argument("--full-index", action="store_true",
@@ -166,8 +222,18 @@ def main():
         print(f"Synthetic noise on {len(test_items)} BN dict words "
               f"(seed={args.seed})")
 
+    # ─── Initialize the LLM backend ───────────────────────────────────
+    llama_cpp_backend = None
+    if args.backend == "llama-cpp":
+        llama_cpp_backend = LlamaCppBackend(
+            args.gguf, n_gpu_layers=args.n_gpu_layers,
+        )
+        backend_label = f"llama-cpp ({args.gguf.name})"
+    else:
+        backend_label = f"ollama ({args.model})"
+
     # ─── Run the arbiter loop ─────────────────────────────────────────
-    print(f"\nLLM model: {args.model}  |  candidates per query: {args.k}\n")
+    print(f"\nBackend: {backend_label}  |  candidates per query: {args.k}\n")
 
     results = []
     n_dtw_correct = 0          # baseline: DTW rank-1 == gold
@@ -200,7 +266,10 @@ def main():
 
         # 2. Build prompt + call LLM
         prompt = build_prompt(noisy_ipa, candidates)
-        reply = call_ollama(args.model, SYSTEM_PROMPT, prompt)
+        if llama_cpp_backend is not None:
+            reply = llama_cpp_backend.chat(SYSTEM_PROMPT, prompt)
+        else:
+            reply = call_ollama(args.model, SYSTEM_PROMPT, prompt)
         pick_idx = parse_llm_response(reply, len(candidates))
 
         if pick_idx is None:
@@ -242,7 +311,7 @@ def main():
     lift = llm_acc - dtw_acc
 
     print(f"\n{'=' * 64}")
-    print(f"LLM-Arbiter results — n={n}, k={args.k}, model={args.model}")
+    print(f"LLM-Arbiter results — n={n}, k={args.k}, backend={backend_label}")
     print(f"{'=' * 64}")
     print(f"  DTW rank-1 (baseline):    {dtw_acc:.1%}  ({n_dtw_correct}/{n})")
     print(f"  LLM-arbiter rank-1:       {llm_acc:.1%}  ({n_llm_correct}/{n})")
@@ -292,7 +361,10 @@ def main():
     with open(args.out, "w", encoding="utf-8") as f:
         json.dump({
             "config": {
-                "n": n, "k": args.k, "model": args.model,
+                "n": n, "k": args.k,
+                "backend": args.backend,
+                "gguf": str(args.gguf) if args.backend == "llama-cpp" else None,
+                "ollama_model": args.model if args.backend == "ollama" else None,
                 "bengali_only": args.bengali_only,
                 "jsonl": str(args.jsonl) if args.jsonl else None,
             },

@@ -123,14 +123,21 @@ phys-faiss-only n="200" prefilter="padded":
 phys-faiss-dtw n="200" prefilter="padded" faiss_k="500":
     uv run python scripts/test_phys_lattice_recall.py --bengali-only --mode noisy --n {{n}} --search-mode two-stage --prefilter {{prefilter}} --faiss-k {{faiss_k}}
 
-# LLM-arbiter on top of v3 lattice: does LLM picking from top-K beat DTW rank-1?
-# Requires: ollama pull qwen2.5:7b
-llm-arbiter n="200" k="30" model="qwen2.5:7b":
-    uv run python scripts/test_llm_arbiter.py --n {{n}} --k {{k}} --model {{model}}
+# LLM-arbiter (default: local Aya 8B GGUF on GPU)
+llm-arbiter n="200" k="30":
+    uv run python scripts/test_llm_arbiter.py --n {{n}} --k {{k}}
 
-# Quick smoke test (10 items, ~1 min)
+# Smoke test with the local GGUF (10 items, ~1 min after model load)
 llm-arbiter-smoke:
     uv run python scripts/test_llm_arbiter.py --n 10 --k 20
+
+# Use a different GGUF
+llm-arbiter-gguf n="200" k="30" gguf="models/aya-expanse-8b.Q4_K_M.gguf":
+    uv run python scripts/test_llm_arbiter.py --n {{n}} --k {{k}} --gguf "{{gguf}}"
+
+# Use Ollama daemon instead (e.g. for qwen2.5:7b comparison)
+llm-arbiter-ollama n="200" k="30" model="qwen2.5:7b":
+    uv run python scripts/test_llm_arbiter.py --n {{n}} --k {{k}} --backend ollama --model {{model}}
 
 # Compare all three prefilters head-to-head on same n queries
 phys-prefilter-ablation n="200":
