@@ -114,6 +114,14 @@ phys-recall-bn-clean n="500":
 phys-recall-bn n="500":
     uv run python scripts/test_phys_lattice_recall.py --bengali-only --mode noisy --n {{n}}
 
+# v4 Stage A only: FAISS cosine prefilter recall@500 (the v4 ceiling)
+phys-faiss-only n="200":
+    uv run python scripts/test_phys_lattice_recall.py --bengali-only --mode noisy --n {{n}} --search-mode faiss-only
+
+# v4 Stage A + B: FAISS prefilter -> exact DTW rerank (the v4 architecture)
+phys-faiss-dtw n="200" faiss_k="500":
+    uv run python scripts/test_phys_lattice_recall.py --bengali-only --mode noisy --n {{n}} --search-mode two-stage --faiss-k {{faiss_k}}
+
 # Recall@K sanity check — clean IPA (should be ~100%)
 phys-recall-clean n="500":
     uv run python scripts/test_phys_lattice_recall.py --mode clean --n {{n}}

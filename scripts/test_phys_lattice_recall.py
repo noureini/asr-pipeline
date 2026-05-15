@@ -213,6 +213,9 @@ class IPAIndex:
         self.buckets_pos1: dict[str, list[int]] = defaultdict(list)
         # Precomputed at build time: phone -> list of feature-neighbor phones
         self.neighbor_buckets: dict[str, list[str]] = {}
+        # FAISS-style averaged feature vectors (one per entry, normalized)
+        # for fast cosine prefilter. Shape: (n_entries, 24).
+        self.avg_vecs: np.ndarray | None = None
         self.fs: FeatureSpace | None = None  # set after build/load
 
     def add(self, word: str, ipa: str, feats: list[np.ndarray], first: str,
@@ -303,6 +306,78 @@ class IPAIndex:
             cands.update(self.buckets_pos1.get(nb, []))
 
         return list(cands)
+
+    def build_avg_vecs(self) -> None:
+        """Build the FAISS-style averaged feature index.
+        One normalized 24-dim vector per dictionary entry. Lossy
+        (loses phone order) but enables cosine prefilter at any scale."""
+        n = len(self.entries)
+        if n == 0:
+            self.avg_vecs = np.zeros((0, 24), dtype=np.float32)
+            return
+        out = np.zeros((n, 24), dtype=np.float32)
+        for i, (_w, _ipa, feats) in enumerate(self.entries):
+            if not feats:
+                continue
+            avg = np.mean(np.stack(feats), axis=0)
+            norm = np.linalg.norm(avg)
+            if norm > 1e-10:
+                out[i] = avg / norm
+        self.avg_vecs = out
+        print(f"  Built FAISS-style avg-vec index: shape={out.shape}")
+
+    @staticmethod
+    def _query_avg_vec(ipa: str, fs: FeatureSpace) -> np.ndarray:
+        """Average + normalize the query's feature vectors (matches the
+        same encoding used for dict entries)."""
+        feats = fs.segment(ipa)
+        if not feats:
+            return np.zeros(24, dtype=np.float32)
+        avg = np.mean(np.stack(feats), axis=0)
+        norm = np.linalg.norm(avg)
+        return (avg / norm) if norm > 1e-10 else avg
+
+    def search_faiss_only(self, ipa: str, fs: FeatureSpace,
+                          k: int = 500) -> list[tuple[float, str]]:
+        """Stage A only: cosine on averaged vectors. Returns top-K
+        (similarity, word). NO DTW, NO bucketing. The recall@K of THIS
+        method is the upper bound on what the v4 architecture can
+        achieve, since DTW only sees the prefilter survivors."""
+        if self.avg_vecs is None:
+            raise RuntimeError("avg_vecs not built — call build_avg_vecs() "
+                               "after building the index.")
+        qv = self._query_avg_vec(ipa, fs)
+        if not np.any(qv):
+            return []
+        scores = self.avg_vecs @ qv  # cosine since both are normalized
+        top_idx = np.argsort(scores)[::-1][:k]
+        return [(float(scores[i]), self.entries[i][0]) for i in top_idx]
+
+    def search_two_stage(self, ipa: str, fs: FeatureSpace,
+                         faiss_k: int = 500, final_k: int = 32,
+                         max_len_diff: int = 3) -> list[tuple[float, str]]:
+        """Stage A (FAISS prefilter) -> Stage B (exact DTW rerank).
+        FAISS narrows 197K -> faiss_k candidates; DTW reranks those."""
+        if self.avg_vecs is None:
+            raise RuntimeError("avg_vecs not built")
+        qv = self._query_avg_vec(ipa, fs)
+        if not np.any(qv):
+            return []
+        scores = self.avg_vecs @ qv
+        prefilter_idx = np.argsort(scores)[::-1][:faiss_k]
+        query = fs.segment(ipa)
+        if not query:
+            return []
+        qn = len(query)
+        scored = []
+        for idx in prefilter_idx:
+            word, _wipa, feats = self.entries[idx]
+            if abs(len(feats) - qn) > max_len_diff:
+                continue
+            d = dtw_distance(query, feats)
+            scored.append((d, word))
+        scored.sort(key=lambda x: x[0])
+        return scored[:final_k]
 
     def search(self, ipa: str, fs: FeatureSpace, k: int = 32,
                max_len_diff: int = 3) -> list[tuple[float, str]]:
@@ -424,6 +499,8 @@ def build_from_tsv(fs: FeatureSpace, tsv_dir: Path,
     print(f"Bucket count: {len(idx.buckets)} unique first-phones")
     print(f"Computing first-phone neighbor table (~5s)...")
     idx.precompute_neighbors(fs)
+    print(f"Building FAISS-style averaged feature index...")
+    idx.build_avg_vecs()
     return idx
 
 
@@ -506,6 +583,8 @@ def build_from_bangla_ipa(fs: FeatureSpace, max_words: int = -1) -> IPAIndex:
     print(f"Bucket count: {len(idx.buckets)} unique first-phones")
     print(f"Computing first-phone neighbor table (~5s)...")
     idx.precompute_neighbors(fs)
+    print(f"Building FAISS-style averaged feature index...")
+    idx.build_avg_vecs()
     return idx
 
 
@@ -520,6 +599,7 @@ def save_index(idx: IPAIndex, path: Path):
             "buckets": dict(idx.buckets),
             "buckets_pos1": dict(idx.buckets_pos1),
             "neighbor_buckets": dict(idx.neighbor_buckets),
+            "avg_vecs": idx.avg_vecs,
         }, f)
     size_mb = path.stat().st_size / 1024 / 1024
     print(f"Saved index -> {path} ({size_mb:.1f} MB)")
@@ -535,9 +615,13 @@ def load_index(path: Path) -> IPAIndex:
     idx.buckets = defaultdict(list, d["buckets"])
     idx.buckets_pos1 = defaultdict(list, d.get("buckets_pos1", {}))
     idx.neighbor_buckets = d.get("neighbor_buckets", {})
+    idx.avg_vecs = d.get("avg_vecs")
     if not idx.neighbor_buckets or not idx.buckets_pos1:
         print(f"  WARNING: cached index lacks neighbor_buckets / buckets_pos1.")
         print(f"  Rebuild required: just phys-build-bn  (or phys-build)")
+    if idx.avg_vecs is None:
+        print(f"  Note: cached index lacks avg_vecs (FAISS prefilter).")
+        print(f"  Building now (~5s)... or rebuild for permanent fix.")
     print(f"Loaded index: {len(idx)} entries from {path}")
     return idx
 
@@ -595,8 +679,18 @@ def noise_inject(ipa: str, fs: FeatureSpace,
 
 def evaluate_recall(idx: IPAIndex, fs: FeatureSpace,
                     test_items: list[dict],
-                    k_values: list[int] = (1, 5, 10, 32, 100)) -> dict:
-    """test_items: list of {word, gold_ipa, noisy_ipa}. Returns metrics dict."""
+                    k_values: list[int] = (1, 5, 10, 32, 100, 500),
+                    search_mode: str = "default",
+                    faiss_k: int = 500) -> dict:
+    """test_items: list of {word, gold_ipa, noisy_ipa}. Returns metrics dict.
+
+    search_mode:
+      'default'    — bucket+DTW (the v3 path)
+      'faiss-only' — Stage A only (cosine on averaged vectors). Recall@K
+                     of THIS mode is the upper bound for v4: DTW only
+                     sees what FAISS surfaces.
+      'two-stage'  — Stage A + Stage B (FAISS prefilter -> DTW rerank)
+    """
     max_k = max(k_values)
     hits = {k: 0 for k in k_values}
     rank_sum = 0
@@ -606,7 +700,8 @@ def evaluate_recall(idx: IPAIndex, fs: FeatureSpace,
     per_word_results = []
 
     t0 = time.time()
-    print(f"\nEvaluating {n_total} items (search top-{max_k} per item)...")
+    print(f"\nEvaluating {n_total} items (mode={search_mode}, "
+          f"top-{max_k} per item)...")
     for i, item in enumerate(test_items):
         word = item["word"]
         query_ipa = item["noisy_ipa"]
@@ -616,7 +711,13 @@ def evaluate_recall(idx: IPAIndex, fs: FeatureSpace,
         if word_in_dict:
             n_in_dict += 1
 
-        results = idx.search(query_ipa, fs, k=max_k)
+        if search_mode == "faiss-only":
+            results = idx.search_faiss_only(query_ipa, fs, k=max_k)
+        elif search_mode == "two-stage":
+            results = idx.search_two_stage(query_ipa, fs,
+                                           faiss_k=faiss_k, final_k=max_k)
+        else:
+            results = idx.search(query_ipa, fs, k=max_k)
         result_words = [w for _, w in results]
 
         # Rank of gold word (-1 if not found in top-K)
@@ -695,7 +796,7 @@ def print_verdict_block(metrics: dict, per_item: list[dict], mode_label: str):
           f"({metrics['dict_coverage']:.1%}) gold words present")
     print(f"Mean rank when found: {metrics['mean_rank_when_found']:.2f}")
     print()
-    for k in [1, 5, 10, 32, 100]:
+    for k in [1, 5, 10, 32, 100, 500]:
         key = f"recall@{k}"
         if key not in metrics:
             continue
@@ -815,6 +916,14 @@ def main():
                    help="Filter dictionary to entries containing Bengali "
                         "characters (drops CMUDict English). Uses a separate "
                         "cache file so toggling doesn't clobber the full index.")
+    p.add_argument("--search-mode", choices=["default", "faiss-only", "two-stage"],
+                   default="default",
+                   help="default=bucket+DTW (v3). faiss-only=Stage A cosine "
+                        "prefilter only — its recall@K is the v4 upper bound. "
+                        "two-stage=Stage A then DTW rerank on faiss-k survivors.")
+    p.add_argument("--faiss-k", type=int, default=500,
+                   help="FAISS prefilter survivor count for --search-mode "
+                        "two-stage (default 500)")
     p.add_argument("--max-words", type=int, default=-1,
                    help="Cap dict size while building (debug only)")
 
@@ -896,8 +1005,16 @@ def main():
             test_items = test_items[:args.n]
         print(f"\nMode: JSONL ({args.test_jsonl}, {len(test_items)} items)")
 
+    # ─── Auto-build avg_vecs if loading an old cache without it ───────
+    if args.search_mode in ("faiss-only", "two-stage") and idx.avg_vecs is None:
+        idx.build_avg_vecs()
+
     # ─── Run evaluation ───────────────────────────────────────────────
-    metrics, per_item = evaluate_recall(idx, fs, test_items)
+    metrics, per_item = evaluate_recall(
+        idx, fs, test_items,
+        search_mode=args.search_mode,
+        faiss_k=args.faiss_k,
+    )
 
     # ─── Report ───────────────────────────────────────────────────────
     print_verdict_block(metrics, per_item, args.mode)
