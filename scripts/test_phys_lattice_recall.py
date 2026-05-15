@@ -213,8 +213,11 @@ class IPAIndex:
         self.buckets_pos1: dict[str, list[int]] = defaultdict(list)
         # Precomputed at build time: phone -> list of feature-neighbor phones
         self.neighbor_buckets: dict[str, list[str]] = {}
-        # FAISS-style averaged feature vectors (one per entry, normalized)
-        # for fast cosine prefilter. Shape: (n_entries, 24).
+        # Phone-bigram bag-of-words sparse index (preserves local phone
+        # order, unlike averaging). Shape: (n_entries, n_bigrams).
+        self.bigram_vecs = None  # scipy.sparse.csr_matrix
+        self.bigram_vocab: dict[str, int] = {}
+        # Legacy averaged feature vectors (kept for ablation only)
         self.avg_vecs: np.ndarray | None = None
         self.fs: FeatureSpace | None = None  # set after build/load
 
@@ -307,10 +310,138 @@ class IPAIndex:
 
         return list(cands)
 
+    def build_bigram_vecs(self, fs: FeatureSpace) -> None:
+        """Build phone-bigram bag-of-words sparse index for cosine prefilter.
+
+        Each word is encoded as a multi-hot sparse vector over its phone
+        bigrams (with ^ and $ boundary markers). Captures LOCAL ORDER —
+        kɔpir and rikɔp share the bigram 'ɔ|p' but have different
+        boundary bigrams ^|k vs ^|r and r|$ vs p|$.
+
+        L2-normalized rows so dot product = cosine similarity.
+
+        Cost: ~10MB sparse matrix for 197K Bengali entries.
+        """
+        try:
+            from scipy.sparse import csr_matrix, diags
+        except ImportError:
+            print("ERROR: scipy required. Run: uv pip install scipy")
+            sys.exit(1)
+
+        # Pass 1: collect all bigrams per word + the global vocab
+        word_bigrams: list[list[str]] = []
+        vocab: set[str] = set()
+        for _w, ipa, _feats in self.entries:
+            clean = "".join(ipa.split())
+            segs = fs.ft.ipa_segs(clean)
+            padded = ["^"] + segs + ["$"]
+            bgs = [padded[i] + "|" + padded[i + 1] for i in range(len(padded) - 1)]
+            word_bigrams.append(bgs)
+            vocab.update(bgs)
+
+        # Stable, sorted vocab (deterministic indexing)
+        self.bigram_vocab = {bg: i for i, bg in enumerate(sorted(vocab))}
+        n_entries = len(self.entries)
+        n_vocab = len(self.bigram_vocab)
+
+        # Pass 2: build sparse COO -> CSR
+        rows, cols, data = [], [], []
+        for word_idx, bgs in enumerate(word_bigrams):
+            # Use multiplicity (a word with kk has kk-bigram with weight 1)
+            counts: dict[str, int] = defaultdict(int)
+            for bg in bgs:
+                counts[bg] += 1
+            for bg, c in counts.items():
+                rows.append(word_idx)
+                cols.append(self.bigram_vocab[bg])
+                data.append(float(c))
+
+        m = csr_matrix((data, (rows, cols)),
+                       shape=(n_entries, n_vocab), dtype=np.float32)
+
+        # L2-normalize rows
+        row_norms = np.sqrt(np.asarray(m.multiply(m).sum(axis=1)).flatten())
+        row_norms[row_norms == 0] = 1.0
+        inv = diags(1.0 / row_norms)
+        self.bigram_vecs = inv @ m
+
+        nnz = self.bigram_vecs.nnz
+        size_mb = (self.bigram_vecs.data.nbytes
+                   + self.bigram_vecs.indices.nbytes
+                   + self.bigram_vecs.indptr.nbytes) / 1024 / 1024
+        print(f"  Bigram index: {n_entries} entries x {n_vocab} bigrams, "
+              f"{nnz} nnz, {size_mb:.1f} MB")
+
+    def _query_bigram_vec(self, ipa: str, fs: FeatureSpace):
+        """Encode a query the same way as dict entries."""
+        from scipy.sparse import csr_matrix
+        clean = "".join(ipa.split())
+        segs = fs.ft.ipa_segs(clean)
+        if not segs:
+            return None
+        padded = ["^"] + segs + ["$"]
+        bgs = [padded[i] + "|" + padded[i + 1] for i in range(len(padded) - 1)]
+        # Drop bigrams not seen at build time (OOV bigrams contribute nothing)
+        counts: dict[int, float] = defaultdict(float)
+        for bg in bgs:
+            j = self.bigram_vocab.get(bg)
+            if j is not None:
+                counts[j] += 1.0
+        if not counts:
+            return None
+        cols = list(counts.keys())
+        data = list(counts.values())
+        rows = [0] * len(cols)
+        n_vocab = len(self.bigram_vocab)
+        qv = csr_matrix((data, (rows, cols)),
+                        shape=(1, n_vocab), dtype=np.float32)
+        # Normalize
+        norm = np.sqrt(qv.multiply(qv).sum())
+        if norm > 1e-10:
+            qv = qv / norm
+        return qv
+
+    def build_padded_vecs(self, max_phones: int = 15) -> None:
+        """Pad-and-concatenate feature index. Each word -> max_phones * 24
+        dense vector (zero-pad if shorter, truncate if longer). Order is
+        preserved by position; cosine matches phone-by-phone aligned at
+        absolute positions. Excellent for substitution noise; brittle
+        to insertion/deletion (which shifts all positions).
+        """
+        n = len(self.entries)
+        feat_dim = 24
+        self.padded_max_phones = max_phones
+        out = np.zeros((n, max_phones * feat_dim), dtype=np.float32)
+        for i, (_w, _ipa, feats) in enumerate(self.entries):
+            for j, f in enumerate(feats[:max_phones]):
+                out[i, j * feat_dim:(j + 1) * feat_dim] = f
+        # L2-normalize rows for cosine via dot product
+        norms = np.linalg.norm(out, axis=1, keepdims=True)
+        norms[norms == 0] = 1.0
+        out /= norms
+        self.padded_vecs = out
+        size_mb = out.nbytes / 1024 / 1024
+        print(f"  Padded index: {n} entries x {max_phones * feat_dim}-dim "
+              f"({size_mb:.1f} MB)")
+
+    def _query_padded_vec(self, ipa: str, fs: FeatureSpace) -> np.ndarray | None:
+        """Encode the query the same way as the dict entries."""
+        max_phones = getattr(self, "padded_max_phones", 15)
+        feat_dim = 24
+        feats = fs.segment(ipa)
+        if not feats:
+            return None
+        qv = np.zeros(max_phones * feat_dim, dtype=np.float32)
+        for j, f in enumerate(feats[:max_phones]):
+            qv[j * feat_dim:(j + 1) * feat_dim] = f
+        norm = np.linalg.norm(qv)
+        if norm > 1e-10:
+            qv /= norm
+        return qv
+
     def build_avg_vecs(self) -> None:
-        """Build the FAISS-style averaged feature index.
-        One normalized 24-dim vector per dictionary entry. Lossy
-        (loses phone order) but enables cosine prefilter at any scale."""
+        """Legacy: build the averaged feature index (lossy, kept for
+        ablation). Prefer build_padded_vecs() or build_bigram_vecs()."""
         n = len(self.entries)
         if n == 0:
             self.avg_vecs = np.zeros((0, 24), dtype=np.float32)
@@ -337,33 +468,56 @@ class IPAIndex:
         norm = np.linalg.norm(avg)
         return (avg / norm) if norm > 1e-10 else avg
 
+    def _prefilter_scores(self, ipa: str, fs: FeatureSpace,
+                          prefilter: str) -> np.ndarray | None:
+        """Compute scores for ALL dict entries under the chosen prefilter.
+        Returns 1D array of shape (n_entries,) with higher = better, or
+        None if the query couldn't be encoded."""
+        if prefilter == "padded":
+            if not hasattr(self, "padded_vecs") or self.padded_vecs is None:
+                raise RuntimeError("padded_vecs not built")
+            qv = self._query_padded_vec(ipa, fs)
+            if qv is None or not np.any(qv):
+                return None
+            return self.padded_vecs @ qv
+        elif prefilter == "bigram":
+            if self.bigram_vecs is None:
+                raise RuntimeError("bigram_vecs not built")
+            qv = self._query_bigram_vec(ipa, fs)
+            if qv is None:
+                return None
+            # qv: 1×m sparse, bigram_vecs: n×m sparse → returns 1×n sparse
+            return np.asarray((self.bigram_vecs @ qv.T).todense()).flatten()
+        elif prefilter == "avg":
+            if self.avg_vecs is None:
+                raise RuntimeError("avg_vecs not built")
+            qv = self._query_avg_vec(ipa, fs)
+            if not np.any(qv):
+                return None
+            return self.avg_vecs @ qv
+        else:
+            raise ValueError(f"unknown prefilter: {prefilter}")
+
     def search_faiss_only(self, ipa: str, fs: FeatureSpace,
-                          k: int = 500) -> list[tuple[float, str]]:
-        """Stage A only: cosine on averaged vectors. Returns top-K
-        (similarity, word). NO DTW, NO bucketing. The recall@K of THIS
-        method is the upper bound on what the v4 architecture can
-        achieve, since DTW only sees the prefilter survivors."""
-        if self.avg_vecs is None:
-            raise RuntimeError("avg_vecs not built — call build_avg_vecs() "
-                               "after building the index.")
-        qv = self._query_avg_vec(ipa, fs)
-        if not np.any(qv):
+                          k: int = 500,
+                          prefilter: str = "padded") -> list[tuple[float, str]]:
+        """Stage A only: cosine on whichever fixed-size encoding you choose.
+        Recall@K of THIS method is the upper bound on what the v4
+        architecture can achieve (DTW only sees prefilter survivors)."""
+        scores = self._prefilter_scores(ipa, fs, prefilter)
+        if scores is None:
             return []
-        scores = self.avg_vecs @ qv  # cosine since both are normalized
         top_idx = np.argsort(scores)[::-1][:k]
         return [(float(scores[i]), self.entries[i][0]) for i in top_idx]
 
     def search_two_stage(self, ipa: str, fs: FeatureSpace,
                          faiss_k: int = 500, final_k: int = 32,
-                         max_len_diff: int = 3) -> list[tuple[float, str]]:
-        """Stage A (FAISS prefilter) -> Stage B (exact DTW rerank).
-        FAISS narrows 197K -> faiss_k candidates; DTW reranks those."""
-        if self.avg_vecs is None:
-            raise RuntimeError("avg_vecs not built")
-        qv = self._query_avg_vec(ipa, fs)
-        if not np.any(qv):
+                         max_len_diff: int = 3,
+                         prefilter: str = "padded") -> list[tuple[float, str]]:
+        """Stage A (prefilter) -> Stage B (exact DTW rerank)."""
+        scores = self._prefilter_scores(ipa, fs, prefilter)
+        if scores is None:
             return []
-        scores = self.avg_vecs @ qv
         prefilter_idx = np.argsort(scores)[::-1][:faiss_k]
         query = fs.segment(ipa)
         if not query:
@@ -499,7 +653,11 @@ def build_from_tsv(fs: FeatureSpace, tsv_dir: Path,
     print(f"Bucket count: {len(idx.buckets)} unique first-phones")
     print(f"Computing first-phone neighbor table (~5s)...")
     idx.precompute_neighbors(fs)
-    print(f"Building FAISS-style averaged feature index...")
+    print(f"Building padded-feature index (order-preserving)...")
+    idx.build_padded_vecs()
+    print(f"Building bigram-bag index (shift-robust)...")
+    idx.build_bigram_vecs(fs)
+    print(f"Building averaged-feature index (legacy ablation)...")
     idx.build_avg_vecs()
     return idx
 
@@ -583,7 +741,11 @@ def build_from_bangla_ipa(fs: FeatureSpace, max_words: int = -1) -> IPAIndex:
     print(f"Bucket count: {len(idx.buckets)} unique first-phones")
     print(f"Computing first-phone neighbor table (~5s)...")
     idx.precompute_neighbors(fs)
-    print(f"Building FAISS-style averaged feature index...")
+    print(f"Building padded-feature index (order-preserving)...")
+    idx.build_padded_vecs()
+    print(f"Building bigram-bag index (shift-robust)...")
+    idx.build_bigram_vecs(fs)
+    print(f"Building averaged-feature index (legacy ablation)...")
     idx.build_avg_vecs()
     return idx
 
@@ -600,6 +762,10 @@ def save_index(idx: IPAIndex, path: Path):
             "buckets_pos1": dict(idx.buckets_pos1),
             "neighbor_buckets": dict(idx.neighbor_buckets),
             "avg_vecs": idx.avg_vecs,
+            "padded_vecs": getattr(idx, "padded_vecs", None),
+            "padded_max_phones": getattr(idx, "padded_max_phones", 15),
+            "bigram_vecs": idx.bigram_vecs,
+            "bigram_vocab": idx.bigram_vocab,
         }, f)
     size_mb = path.stat().st_size / 1024 / 1024
     print(f"Saved index -> {path} ({size_mb:.1f} MB)")
@@ -616,12 +782,19 @@ def load_index(path: Path) -> IPAIndex:
     idx.buckets_pos1 = defaultdict(list, d.get("buckets_pos1", {}))
     idx.neighbor_buckets = d.get("neighbor_buckets", {})
     idx.avg_vecs = d.get("avg_vecs")
+    idx.padded_vecs = d.get("padded_vecs")
+    idx.padded_max_phones = d.get("padded_max_phones", 15)
+    idx.bigram_vecs = d.get("bigram_vecs")
+    idx.bigram_vocab = d.get("bigram_vocab", {})
     if not idx.neighbor_buckets or not idx.buckets_pos1:
         print(f"  WARNING: cached index lacks neighbor_buckets / buckets_pos1.")
         print(f"  Rebuild required: just phys-build-bn  (or phys-build)")
-    if idx.avg_vecs is None:
-        print(f"  Note: cached index lacks avg_vecs (FAISS prefilter).")
-        print(f"  Building now (~5s)... or rebuild for permanent fix.")
+    missing = []
+    if idx.padded_vecs is None: missing.append("padded_vecs")
+    if idx.bigram_vecs is None: missing.append("bigram_vecs")
+    if idx.avg_vecs is None: missing.append("avg_vecs")
+    if missing:
+        print(f"  Note: cache missing {missing} — rebuild for FAISS modes.")
     print(f"Loaded index: {len(idx)} entries from {path}")
     return idx
 
@@ -681,7 +854,8 @@ def evaluate_recall(idx: IPAIndex, fs: FeatureSpace,
                     test_items: list[dict],
                     k_values: list[int] = (1, 5, 10, 32, 100, 500),
                     search_mode: str = "default",
-                    faiss_k: int = 500) -> dict:
+                    faiss_k: int = 500,
+                    prefilter: str = "padded") -> dict:
     """test_items: list of {word, gold_ipa, noisy_ipa}. Returns metrics dict.
 
     search_mode:
@@ -712,10 +886,12 @@ def evaluate_recall(idx: IPAIndex, fs: FeatureSpace,
             n_in_dict += 1
 
         if search_mode == "faiss-only":
-            results = idx.search_faiss_only(query_ipa, fs, k=max_k)
+            results = idx.search_faiss_only(query_ipa, fs, k=max_k,
+                                            prefilter=prefilter)
         elif search_mode == "two-stage":
             results = idx.search_two_stage(query_ipa, fs,
-                                           faiss_k=faiss_k, final_k=max_k)
+                                           faiss_k=faiss_k, final_k=max_k,
+                                           prefilter=prefilter)
         else:
             results = idx.search(query_ipa, fs, k=max_k)
         result_words = [w for _, w in results]
@@ -924,6 +1100,12 @@ def main():
     p.add_argument("--faiss-k", type=int, default=500,
                    help="FAISS prefilter survivor count for --search-mode "
                         "two-stage (default 500)")
+    p.add_argument("--prefilter", choices=["padded", "bigram", "avg"],
+                   default="padded",
+                   help="Prefilter encoding. padded=pad-and-concat (preserves "
+                        "phone position, brittle to insertion/deletion). "
+                        "bigram=phone-bigram bag-of-words (shift-robust). "
+                        "avg=averaged features (lossy baseline).")
     p.add_argument("--max-words", type=int, default=-1,
                    help="Cap dict size while building (debug only)")
 
@@ -1005,15 +1187,24 @@ def main():
             test_items = test_items[:args.n]
         print(f"\nMode: JSONL ({args.test_jsonl}, {len(test_items)} items)")
 
-    # ─── Auto-build avg_vecs if loading an old cache without it ───────
-    if args.search_mode in ("faiss-only", "two-stage") and idx.avg_vecs is None:
-        idx.build_avg_vecs()
+    # ─── Auto-build the chosen prefilter index if missing from cache ──
+    if args.search_mode in ("faiss-only", "two-stage"):
+        if args.prefilter == "padded" and getattr(idx, "padded_vecs", None) is None:
+            print("Building padded_vecs (cache miss)...")
+            idx.build_padded_vecs()
+        elif args.prefilter == "bigram" and idx.bigram_vecs is None:
+            print("Building bigram_vecs (cache miss)...")
+            idx.build_bigram_vecs(fs)
+        elif args.prefilter == "avg" and idx.avg_vecs is None:
+            print("Building avg_vecs (cache miss)...")
+            idx.build_avg_vecs()
 
     # ─── Run evaluation ───────────────────────────────────────────────
     metrics, per_item = evaluate_recall(
         idx, fs, test_items,
         search_mode=args.search_mode,
         faiss_k=args.faiss_k,
+        prefilter=args.prefilter,
     )
 
     # ─── Report ───────────────────────────────────────────────────────

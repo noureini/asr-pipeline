@@ -114,13 +114,25 @@ phys-recall-bn-clean n="500":
 phys-recall-bn n="500":
     uv run python scripts/test_phys_lattice_recall.py --bengali-only --mode noisy --n {{n}}
 
-# v4 Stage A only: FAISS cosine prefilter recall@500 (the v4 ceiling)
-phys-faiss-only n="200":
-    uv run python scripts/test_phys_lattice_recall.py --bengali-only --mode noisy --n {{n}} --search-mode faiss-only
+# v4 Stage A only: cosine prefilter recall@500 (the v4 ceiling)
+# prefilter choices: padded (default, order-preserving) | bigram (shift-robust) | avg (lossy baseline)
+phys-faiss-only n="200" prefilter="padded":
+    uv run python scripts/test_phys_lattice_recall.py --bengali-only --mode noisy --n {{n}} --search-mode faiss-only --prefilter {{prefilter}}
 
-# v4 Stage A + B: FAISS prefilter -> exact DTW rerank (the v4 architecture)
-phys-faiss-dtw n="200" faiss_k="500":
-    uv run python scripts/test_phys_lattice_recall.py --bengali-only --mode noisy --n {{n}} --search-mode two-stage --faiss-k {{faiss_k}}
+# v4 Stage A + B: prefilter -> exact DTW rerank
+phys-faiss-dtw n="200" prefilter="padded" faiss_k="500":
+    uv run python scripts/test_phys_lattice_recall.py --bengali-only --mode noisy --n {{n}} --search-mode two-stage --prefilter {{prefilter}} --faiss-k {{faiss_k}}
+
+# Compare all three prefilters head-to-head on same n queries
+phys-prefilter-ablation n="200":
+    @echo "=== padded (order-preserving) ==="
+    uv run python scripts/test_phys_lattice_recall.py --bengali-only --mode noisy --n {{n}} --search-mode faiss-only --prefilter padded
+    @echo ""
+    @echo "=== bigram (shift-robust) ==="
+    uv run python scripts/test_phys_lattice_recall.py --bengali-only --mode noisy --n {{n}} --search-mode faiss-only --prefilter bigram
+    @echo ""
+    @echo "=== avg (lossy baseline) ==="
+    uv run python scripts/test_phys_lattice_recall.py --bengali-only --mode noisy --n {{n}} --search-mode faiss-only --prefilter avg
 
 # Recall@K sanity check — clean IPA (should be ~100%)
 phys-recall-clean n="500":
