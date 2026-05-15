@@ -98,6 +98,10 @@ phys-build:
 phys-diagnose:
     uv run python scripts/test_phys_lattice_recall.py --diagnose
 
+# Re-print the verdict block from the last saved run (no re-test)
+phys-report path="results/phys_lattice_recall.json":
+    uv run python scripts/test_phys_lattice_recall.py --report-only "{{path}}"
+
 # Build a Bengali-ONLY index (filters out CMUDict English entries)
 phys-build-bn:
     uv run python scripts/test_phys_lattice_recall.py --build --bengali-only

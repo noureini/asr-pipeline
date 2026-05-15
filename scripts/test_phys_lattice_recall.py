@@ -594,6 +594,46 @@ def gen_noisy_test(idx: IPAIndex, fs: FeatureSpace, n: int,
             for w, ipa in sample]
 
 
+def print_verdict_block(metrics: dict, per_item: list[dict], mode_label: str):
+    """Print the standard verdict block. Reused by both live runs and
+    --report-only mode (which loads metrics + per_item from saved JSON)."""
+    print(f"\n{'=' * 60}")
+    print(f"PhysASR recall@K — {mode_label.upper()} mode, n={metrics['n_test']}")
+    print(f"{'=' * 60}")
+    print(f"Dictionary coverage: {metrics['n_in_dict']}/{metrics['n_test']} "
+          f"({metrics['dict_coverage']:.1%}) gold words present")
+    print(f"Mean rank when found: {metrics['mean_rank_when_found']:.2f}")
+    print()
+    for k in [1, 5, 10, 32, 100]:
+        key = f"recall@{k}"
+        if key not in metrics:
+            continue
+        v = metrics[key]
+        bar = "█" * int(v * 40)
+        verdict = "✓" if v >= 0.95 else ("~" if v >= 0.80 else "✗")
+        print(f"  recall@{k:<4} {v:.2%}  {bar}  {verdict}")
+
+    print(f"\n{'─' * 60}")
+    r32 = metrics.get("recall@32", 0.0)
+    if r32 >= 0.95:
+        print(f"VERDICT: recall@32={r32:.1%} >= 95%. Physics lattice IS a viable")
+        print(f"         candidate generator. Build the LLM-arbiter hybrid.")
+    elif r32 >= 0.85:
+        print(f"VERDICT: recall@32={r32:.1%} (85-95%). Promising but borderline.")
+        print(f"         Investigate failure cases before committing.")
+    else:
+        print(f"VERDICT: recall@32={r32:.1%} < 85%. Framework has a ceiling.")
+        print(f"         No amount of reranking will fix this. Reconsider.")
+
+    failures = [r for r in per_item if r["rank"] < 0 or r["rank"] >= 32]
+    if failures:
+        print(f"\nSample failures (recall@32 misses, showing 5):")
+        for r in failures[:5]:
+            print(f"  word={r['word']:<20} ipa_query={r['noisy_ipa']:<20}")
+            print(f"    in_dict={r['in_dict']}  rank={r['rank']}  "
+                  f"top5={r['top5']}")
+
+
 def load_jsonl_test(path: Path) -> list[dict]:
     """Accept either {word, noisy_ipa: "d̪ʰɔn"} or
     {word, noisy_ipa_tokens: ["d", "̪", "ʰ", "ɔ", "n"]} (ZIPA-style)."""
@@ -668,6 +708,10 @@ def main():
                    help="Print panphon segmentation for sample inputs and "
                         "exit. Run this BEFORE trusting recall numbers — it "
                         "verifies that diacritics group correctly.")
+    p.add_argument("--report-only", type=Path, default=None,
+                   help="Re-print the verdict block from a saved results JSON "
+                        "(default location: results/phys_lattice_recall.json). "
+                        "No re-running of the test.")
     p.add_argument("--source", choices=["tsv", "bangla-pkg"], default="tsv",
                    help="Where to read the lexicon from. 'tsv' (default) reads "
                         "all *.tsv files in --tsv-dir (the format produced by "
@@ -697,6 +741,18 @@ def main():
                    default=Path("results/phys_lattice_recall.json"))
 
     args = p.parse_args()
+
+    # ─── Report-only fast path (no panphon, no index needed) ──────────
+    if args.report_only is not None:
+        path = args.report_only
+        if not path.exists():
+            print(f"ERROR: results file not found: {path}")
+            sys.exit(1)
+        with open(path, encoding="utf-8") as f:
+            d = json.load(f)
+        mode_label = d.get("config", {}).get("mode", "unknown")
+        print_verdict_block(d["metrics"], d["per_item"], mode_label)
+        return
 
     fs = FeatureSpace()
 
@@ -753,40 +809,7 @@ def main():
     metrics, per_item = evaluate_recall(idx, fs, test_items)
 
     # ─── Report ───────────────────────────────────────────────────────
-    print(f"\n{'=' * 60}")
-    print(f"PhysASR recall@K — {args.mode.upper()} mode, n={metrics['n_test']}")
-    print(f"{'=' * 60}")
-    print(f"Dictionary coverage: {metrics['n_in_dict']}/{metrics['n_test']} "
-          f"({metrics['dict_coverage']:.1%}) gold words present")
-    print(f"Mean rank when found: {metrics['mean_rank_when_found']:.2f}")
-    print()
-    for k in [1, 5, 10, 32, 100]:
-        v = metrics[f"recall@{k}"]
-        bar = "█" * int(v * 40)
-        verdict = "✓" if v >= 0.95 else ("~" if v >= 0.80 else "✗")
-        print(f"  recall@{k:<4} {v:.2%}  {bar}  {verdict}")
-
-    # Verdict
-    print(f"\n{'─' * 60}")
-    r32 = metrics["recall@32"]
-    if r32 >= 0.95:
-        print(f"VERDICT: recall@32={r32:.1%} ≥ 95%. Physics lattice IS a viable")
-        print(f"         candidate generator. Build the LLM-arbiter hybrid.")
-    elif r32 >= 0.85:
-        print(f"VERDICT: recall@32={r32:.1%} (85-95%). Promising but borderline.")
-        print(f"         Investigate failure cases before committing.")
-    else:
-        print(f"VERDICT: recall@32={r32:.1%} < 85%. Framework has a ceiling.")
-        print(f"         No amount of reranking will fix this. Reconsider.")
-
-    # Sample failures for debugging
-    failures = [r for r in per_item if r["rank"] < 0 or r["rank"] >= 32]
-    if failures:
-        print(f"\nSample failures (recall@32 misses, showing 5):")
-        for r in failures[:5]:
-            print(f"  word={r['word']:<20} ipa_query={r['noisy_ipa']:<20}")
-            print(f"    in_dict={r['in_dict']}  rank={r['rank']}  "
-                  f"top5={r['top5']}")
+    print_verdict_block(metrics, per_item, args.mode)
 
     # Save full results
     args.out.parent.mkdir(parents=True, exist_ok=True)
