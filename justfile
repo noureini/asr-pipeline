@@ -162,6 +162,10 @@ phys-recall n="500":
 phys-recall-jsonl path n="500":
     uv run python scripts/test_phys_lattice_recall.py --mode jsonl --test-jsonl "{{path}}" --n {{n}}
 
+# Fetch N privacy-safe FLEURS Bengali clips + gold refs (for HF Space tests)
+fetch-fleurs-demo n="10":
+    uv run python scripts/fetch_fleurs_demo.py --n {{n}}
+
 # ─── Maintenance ──────────────────────────────────────────────────────────
 
 # Show CUDA / GPU status
