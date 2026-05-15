@@ -207,17 +207,21 @@ class IPAIndex:
 
     def __init__(self):
         self.entries: list[tuple[str, str, list[np.ndarray]]] = []
+        # Words indexed by their FIRST phone (the primary index)
         self.buckets: dict[str, list[int]] = defaultdict(list)
+        # Words indexed by their SECOND phone (for first-phone-deletion recovery)
+        self.buckets_pos1: dict[str, list[int]] = defaultdict(list)
         # Precomputed at build time: phone -> list of feature-neighbor phones
         self.neighbor_buckets: dict[str, list[str]] = {}
         self.fs: FeatureSpace | None = None  # set after build/load
 
-    def add(self, word: str, ipa: str, feats: list[np.ndarray], first: str):
+    def add(self, word: str, ipa: str, feats: list[np.ndarray], first: str,
+            second: str = ""):
         idx = len(self.entries)
         self.entries.append((word, ipa, feats))
         self.buckets[first].append(idx)
-        # No more aspiration-only variants — the neighbor_buckets table
-        # built by precompute_neighbors() handles this and more.
+        if second:
+            self.buckets_pos1[second].append(idx)
 
     def precompute_neighbors(self, fs: FeatureSpace,
                              max_dist: float = 4.0) -> None:
@@ -233,7 +237,9 @@ class IPAIndex:
           - place neighbors (/n/<->/ɳ/, /s/<->/ʃ/) ~= 2-3
           - mild vowel shifts (/a/<->/ɔ/, /e/<->/ɛ/) ~= 2-3
         """
-        bucket_phones = list(self.buckets.keys())
+        # Include phones from BOTH bucket indices so neighbor lookup is
+        # complete for queries against either index.
+        bucket_phones = list(set(self.buckets.keys()) | set(self.buckets_pos1.keys()))
         # Cache vectors first to avoid repeated lookups
         vecs = {p: fs.vec(p) for p in bucket_phones}
         n_neighbors_total = 0
@@ -256,27 +262,46 @@ class IPAIndex:
               f"phone (max_dist={max_dist})")
 
     def candidates(self, ipa: str, fs: FeatureSpace) -> list[int]:
-        """Return candidate dict-entry indices using the neighbor-bucket
-        table. Searches both the query's first-phone neighbors AND
-        the second-phone's neighbors (covers first-phone deletion)."""
+        """Return candidate dict-entry indices.
+
+        Two parallel lookups, both keyed on the QUERY'S FIRST PHONE:
+          1. buckets        — words whose 1st phone is a feature-neighbor
+                              of query[0]. Handles substitutions.
+          2. buckets_pos1   — words whose 2nd phone is a feature-neighbor
+                              of query[0]. Handles first-phone deletion
+                              (the gold word's position-1 phone became
+                              the query's position-0 phone).
+
+        We do NOT look up query[1] anywhere — that pulls in unrelated
+        first-phone-X words and pollutes the candidate pool.
+        """
         clean = "".join(ipa.split())
         segs = fs.ft.ipa_segs(clean)
         if not segs:
             return []
+        q0 = segs[0]
         cands: set[int] = set()
-        # Look up positions 0 AND 1 (handles first-phone deletion)
-        for q_phone in segs[:2]:
-            for nb in self.neighbor_buckets.get(q_phone, [q_phone]):
-                cands.update(self.buckets.get(nb, []))
-            # Fallback if the phone isn't in our bucket index at all
-            if q_phone not in self.neighbor_buckets:
-                # Compare its features against all bucket keys on the fly
-                qv = fs.vec(q_phone)
-                if qv is not None:
-                    for bp, idxs in self.buckets.items():
-                        bv = fs.vec(bp)
-                        if bv is not None and hamming_feat(qv, bv) <= 4.0:
-                            cands.update(idxs)
+
+        # Get neighbors of query[0]
+        neighbors = self.neighbor_buckets.get(q0)
+        if neighbors is None:
+            # Phone not seen at build time — compute on the fly
+            neighbors = [q0]
+            qv = fs.vec(q0)
+            if qv is not None:
+                for bp in self.buckets.keys():
+                    bv = fs.vec(bp)
+                    if bv is not None and hamming_feat(qv, bv) <= 4.0:
+                        neighbors.append(bp)
+
+        # Lookup A: words whose 1st phone matches query[0] or its neighbors
+        for nb in neighbors:
+            cands.update(self.buckets.get(nb, []))
+        # Lookup B: words whose 2nd phone matches query[0] or neighbors
+        # (covers the case where the gold word's 1st phone got deleted)
+        for nb in neighbors:
+            cands.update(self.buckets_pos1.get(nb, []))
+
         return list(cands)
 
     def search(self, ipa: str, fs: FeatureSpace, k: int = 32) -> list[tuple[float, str]]:
@@ -370,8 +395,11 @@ def build_from_tsv(fs: FeatureSpace, tsv_dir: Path,
             if not feats:
                 n_failed += 1
                 continue
-            first = fs.first_phone(ipa)
-            idx.add(w, ipa, feats, first)
+            clean = "".join(ipa.split())
+            segs = fs.ft.ipa_segs(clean)
+            first = segs[0] if segs else ""
+            second = segs[1] if len(segs) > 1 else ""
+            idx.add(w, ipa, feats, first, second)
         except Exception:
             n_failed += 1
             continue
@@ -449,8 +477,11 @@ def build_from_bangla_ipa(fs: FeatureSpace, max_words: int = -1) -> IPAIndex:
             if not feats:
                 n_failed += 1
                 continue
-            first = fs.first_phone(ipa)
-            idx.add(w, ipa, feats, first)
+            clean = "".join(ipa.split())
+            segs = fs.ft.ipa_segs(clean)
+            first = segs[0] if segs else ""
+            second = segs[1] if len(segs) > 1 else ""
+            idx.add(w, ipa, feats, first, second)
         except Exception:
             n_failed += 1
             continue
@@ -476,6 +507,7 @@ def save_index(idx: IPAIndex, path: Path):
         pickle.dump({
             "entries": serializable_entries,
             "buckets": dict(idx.buckets),
+            "buckets_pos1": dict(idx.buckets_pos1),
             "neighbor_buckets": dict(idx.neighbor_buckets),
         }, f)
     size_mb = path.stat().st_size / 1024 / 1024
@@ -490,10 +522,11 @@ def load_index(path: Path) -> IPAIndex:
         feats = [feat_arr[i] for i in range(feat_arr.shape[0])]
         idx.entries.append((w, ipa, feats))
     idx.buckets = defaultdict(list, d["buckets"])
+    idx.buckets_pos1 = defaultdict(list, d.get("buckets_pos1", {}))
     idx.neighbor_buckets = d.get("neighbor_buckets", {})
-    if not idx.neighbor_buckets:
-        print(f"  Note: cached index lacks neighbor_buckets — rebuild "
-              f"recommended ('just phys-build-bn' or 'just phys-build').")
+    if not idx.neighbor_buckets or not idx.buckets_pos1:
+        print(f"  WARNING: cached index lacks neighbor_buckets / buckets_pos1.")
+        print(f"  Rebuild required: just phys-build-bn  (or phys-build)")
     print(f"Loaded index: {len(idx)} entries from {path}")
     return idx
 
