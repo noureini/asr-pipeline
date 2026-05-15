@@ -194,51 +194,89 @@ def dtw_distance(seq_a: list[np.ndarray], seq_b: list[np.ndarray]) -> float:
 # ─── Dictionary index ───────────────────────────────────────────────────
 
 class IPAIndex:
-    """Holds (word, ipa, feature_seq) entries with first-phone bucketing."""
+    """Holds (word, ipa, feature_seq) entries indexed by first phone.
+
+    Bucketing strategy:
+      Each entry lives in exactly one bucket (its true first phone).
+      At query time, we look up the query's first phone and *also* every
+      bucket whose first phone is within feature-distance N (precomputed
+      neighbor table). This handles both substitutions (/dʑ/->/tʑ/) and
+      aspiration flips uniformly. To handle first-phone *deletion*, we
+      additionally look up the query's second phone's neighbor buckets.
+    """
 
     def __init__(self):
         self.entries: list[tuple[str, str, list[np.ndarray]]] = []
         self.buckets: dict[str, list[int]] = defaultdict(list)
+        # Precomputed at build time: phone -> list of feature-neighbor phones
+        self.neighbor_buckets: dict[str, list[str]] = {}
         self.fs: FeatureSpace | None = None  # set after build/load
 
     def add(self, word: str, ipa: str, feats: list[np.ndarray], first: str):
         idx = len(self.entries)
         self.entries.append((word, ipa, feats))
         self.buckets[first].append(idx)
-        # Also bucket under aspirated/unaspirated equivalents for fuzzy lookup
-        for variant in self._first_phone_variants(first):
-            if variant != first:
-                self.buckets[variant].append(idx)
+        # No more aspiration-only variants — the neighbor_buckets table
+        # built by precompute_neighbors() handles this and more.
 
-    @staticmethod
-    def _first_phone_variants(p: str) -> list[str]:
-        """For first-phone lookup, treat aspirated≈unaspirated as same bucket."""
-        if not p:
-            return [p]
-        # Strip aspiration (ʰ) for fuzzy lookup
-        base = p.replace("ʰ", "")
-        if base != p:
-            return [p, base]
-        # Add aspirated variant
-        return [p, p + "ʰ"]
+    def precompute_neighbors(self, fs: FeatureSpace,
+                             max_dist: float = 4.0) -> None:
+        """For each first-phone bucket, list all OTHER buckets within
+        Hamming feature distance <= max_dist. Run once after build.
 
-    def candidates(self, ipa: str, fs: FeatureSpace,
-                   max_extra_buckets: int = 2) -> list[int]:
-        """Return candidate dict-entry indices. Strategy: first-phone bucket
-        plus a few feature-similar first-phone buckets."""
-        first = fs.first_phone(ipa)
-        cands = set(self.buckets.get(first, []))
-        for v in self._first_phone_variants(first):
-            cands.update(self.buckets.get(v, []))
-        # If the bucket is small (rare phone), expand to all entries
-        if len(cands) < 100:
-            target_v = fs.vec(first)
-            if target_v is not None:
-                # Pull all bucket keys whose feature vec is within distance 3
-                for k_phone, idxs in self.buckets.items():
-                    kv = fs.vec(k_phone)
-                    if kv is not None and hamming_feat(target_v, kv) <= 3.0:
-                        cands.update(idxs)
+        With ~150-210 unique first-phones, this is ~25K-45K vec
+        comparisons -- a few seconds at build time, O(1) at query time.
+
+        max_dist=4.0 covers:
+          - voicing flips (/d/<->/t/, /b/<->/p/, /dʑ/<->/tʑ/) ~= 1
+          - aspiration flips (/d/<->/dʰ/) ~= 2
+          - place neighbors (/n/<->/ɳ/, /s/<->/ʃ/) ~= 2-3
+          - mild vowel shifts (/a/<->/ɔ/, /e/<->/ɛ/) ~= 2-3
+        """
+        bucket_phones = list(self.buckets.keys())
+        # Cache vectors first to avoid repeated lookups
+        vecs = {p: fs.vec(p) for p in bucket_phones}
+        n_neighbors_total = 0
+        for p1 in bucket_phones:
+            v1 = vecs[p1]
+            if v1 is None:
+                self.neighbor_buckets[p1] = [p1]
+                continue
+            neighbors = []
+            for p2 in bucket_phones:
+                v2 = vecs[p2]
+                if v2 is None:
+                    continue
+                if hamming_feat(v1, v2) <= max_dist:
+                    neighbors.append(p2)
+            self.neighbor_buckets[p1] = neighbors
+            n_neighbors_total += len(neighbors)
+        avg = n_neighbors_total / max(len(bucket_phones), 1)
+        print(f"  Precomputed neighbor buckets: avg {avg:.1f} neighbors per "
+              f"phone (max_dist={max_dist})")
+
+    def candidates(self, ipa: str, fs: FeatureSpace) -> list[int]:
+        """Return candidate dict-entry indices using the neighbor-bucket
+        table. Searches both the query's first-phone neighbors AND
+        the second-phone's neighbors (covers first-phone deletion)."""
+        clean = "".join(ipa.split())
+        segs = fs.ft.ipa_segs(clean)
+        if not segs:
+            return []
+        cands: set[int] = set()
+        # Look up positions 0 AND 1 (handles first-phone deletion)
+        for q_phone in segs[:2]:
+            for nb in self.neighbor_buckets.get(q_phone, [q_phone]):
+                cands.update(self.buckets.get(nb, []))
+            # Fallback if the phone isn't in our bucket index at all
+            if q_phone not in self.neighbor_buckets:
+                # Compare its features against all bucket keys on the fly
+                qv = fs.vec(q_phone)
+                if qv is not None:
+                    for bp, idxs in self.buckets.items():
+                        bv = fs.vec(bp)
+                        if bv is not None and hamming_feat(qv, bv) <= 4.0:
+                            cands.update(idxs)
         return list(cands)
 
     def search(self, ipa: str, fs: FeatureSpace, k: int = 32) -> list[tuple[float, str]]:
@@ -345,6 +383,8 @@ def build_from_tsv(fs: FeatureSpace, tsv_dir: Path,
     print(f"\nBuilt index: {len(idx)} entries "
           f"({n_failed} failed panphon segmentation)")
     print(f"Bucket count: {len(idx.buckets)} unique first-phones")
+    print(f"Computing first-phone neighbor table (~5s)...")
+    idx.precompute_neighbors(fs)
     return idx
 
 
@@ -422,6 +462,8 @@ def build_from_bangla_ipa(fs: FeatureSpace, max_words: int = -1) -> IPAIndex:
     print(f"\nBuilt index: {len(idx)} entries "
           f"({n_failed} failed IPA conversion)")
     print(f"Bucket count: {len(idx.buckets)} unique first-phones")
+    print(f"Computing first-phone neighbor table (~5s)...")
+    idx.precompute_neighbors(fs)
     return idx
 
 
@@ -434,6 +476,7 @@ def save_index(idx: IPAIndex, path: Path):
         pickle.dump({
             "entries": serializable_entries,
             "buckets": dict(idx.buckets),
+            "neighbor_buckets": dict(idx.neighbor_buckets),
         }, f)
     size_mb = path.stat().st_size / 1024 / 1024
     print(f"Saved index -> {path} ({size_mb:.1f} MB)")
@@ -447,6 +490,10 @@ def load_index(path: Path) -> IPAIndex:
         feats = [feat_arr[i] for i in range(feat_arr.shape[0])]
         idx.entries.append((w, ipa, feats))
     idx.buckets = defaultdict(list, d["buckets"])
+    idx.neighbor_buckets = d.get("neighbor_buckets", {})
+    if not idx.neighbor_buckets:
+        print(f"  Note: cached index lacks neighbor_buckets — rebuild "
+              f"recommended ('just phys-build-bn' or 'just phys-build').")
     print(f"Loaded index: {len(idx)} entries from {path}")
     return idx
 
