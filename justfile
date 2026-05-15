@@ -123,6 +123,15 @@ phys-faiss-only n="200" prefilter="padded":
 phys-faiss-dtw n="200" prefilter="padded" faiss_k="500":
     uv run python scripts/test_phys_lattice_recall.py --bengali-only --mode noisy --n {{n}} --search-mode two-stage --prefilter {{prefilter}} --faiss-k {{faiss_k}}
 
+# LLM-arbiter on top of v3 lattice: does LLM picking from top-K beat DTW rank-1?
+# Requires: ollama pull qwen2.5:7b
+llm-arbiter n="200" k="30" model="qwen2.5:7b":
+    uv run python scripts/test_llm_arbiter.py --n {{n}} --k {{k}} --model {{model}}
+
+# Quick smoke test (10 items, ~1 min)
+llm-arbiter-smoke:
+    uv run python scripts/test_llm_arbiter.py --n 10 --k 20
+
 # Compare all three prefilters head-to-head on same n queries
 phys-prefilter-ablation n="200":
     @echo "=== padded (order-preserving) ==="
