@@ -107,18 +107,54 @@ class FeatureSpace:
         return v
 
     def segment(self, ipa: str) -> list[np.ndarray]:
-        """IPA string -> list of feature vectors (one per segmented phone)."""
-        # panphon's segs_safe handles diacritics like ʰ, ◌ʲ properly
-        segs = self.ft.ipa_segs(ipa)
+        """IPA → list of 24-dim feature vectors. Robust to ZIPA-style
+        space-separated token output and to standalone modifier diacritics.
+
+        Strategy:
+          1. Strip whitespace (ZIPA emits ['d', '̪', 'ʰ', 'ɔ'] which the
+             tokenizer often joins with spaces — we want d̪ʰɔ).
+          2. panphon.ipa_segs() groups base + diacritics into one segment
+             (e.g. 'd̪ʰ' as a single 3-codepoint segment) — this is the
+             "Option B" combine-modifier-into-previous-token behavior.
+          3. If a segment doesn't featurize (e.g. an orphan diacritic
+             that ipa_segs split off), fall back to "Option A": skip it
+             and let DTW absorb the gap with a small insertion cost.
+        """
+        # 1. Normalize ZIPA-style tokenization (strip whitespace + join)
+        clean = "".join(ipa.split())
+        # 2. Let panphon segment with diacritic grouping
+        segs = self.ft.ipa_segs(clean)
         out = []
         for s in segs:
             v = self.vec(s)
             if v is not None:
                 out.append(v)
+            # else: Option A — skip; DTW pays a small insertion cost
         return out
 
+    def diagnose_segment(self, ipa: str) -> dict:
+        """Return per-segment featurization status — for --diagnose mode."""
+        clean = "".join(ipa.split())
+        segs = self.ft.ipa_segs(clean)
+        per_seg = []
+        for s in segs:
+            v = self.vec(s)
+            per_seg.append({
+                "segment": s,
+                "n_codepoints": len(s),
+                "featurized": v is not None,
+            })
+        return {
+            "input": ipa,
+            "normalized": clean,
+            "n_segments": len(segs),
+            "n_featurized": sum(1 for p in per_seg if p["featurized"]),
+            "segments": per_seg,
+        }
+
     def first_phone(self, ipa: str) -> str:
-        segs = self.ft.ipa_segs(ipa)
+        clean = "".join(ipa.split())
+        segs = self.ft.ipa_segs(clean)
         return segs[0] if segs else ""
 
 
@@ -545,6 +581,8 @@ def gen_noisy_test(idx: IPAIndex, fs: FeatureSpace, n: int,
 
 
 def load_jsonl_test(path: Path) -> list[dict]:
+    """Accept either {word, noisy_ipa: "d̪ʰɔn"} or
+    {word, noisy_ipa_tokens: ["d", "̪", "ʰ", "ɔ", "n"]} (ZIPA-style)."""
     items = []
     with open(path, encoding="utf-8") as f:
         for line in f:
@@ -552,10 +590,55 @@ def load_jsonl_test(path: Path) -> list[dict]:
             if not line:
                 continue
             d = json.loads(line)
-            if "word" not in d or "noisy_ipa" not in d:
+            if "word" not in d:
+                continue
+            if "noisy_ipa" not in d and "noisy_ipa_tokens" in d:
+                # ZIPA-style: list of tokens → join (FeatureSpace.segment
+                # also strips whitespace, so " ".join is safe)
+                d["noisy_ipa"] = "".join(d["noisy_ipa_tokens"])
+            if "noisy_ipa" not in d:
                 continue
             items.append(d)
     return items
+
+
+def run_diagnose(fs: FeatureSpace):
+    """Print panphon segmentation for representative inputs so the user
+    can VERIFY that diacritic grouping works before trusting recall@K."""
+    samples = [
+        # (label, raw IPA — possibly with ZIPA-style spaces)
+        ("dict-style aspirated dental",     "d̪ʰɔnnobad"),
+        ("ZIPA-style space-tokenized",      "d ̪ ʰ ɔ n n o b a d"),
+        ("aspirated retroflex + nasal",     "ʈʰɔɳɖa"),
+        ("affricate + aspiration",          "tʃʰatra"),
+        ("voiced aspirated",                "bʰalo"),
+        ("English code-switch (vaccine)",   "vækʃin"),
+        ("standalone modifier orphan",      "ʰ"),
+    ]
+    print(f"\n{'─' * 70}")
+    print(f"DIAGNOSE: panphon segmentation + featurization")
+    print(f"{'─' * 70}")
+    for label, ipa in samples:
+        d = fs.diagnose_segment(ipa)
+        status = "OK" if d["n_featurized"] == d["n_segments"] else "PARTIAL"
+        print(f"\n[{status}] {label}")
+        print(f"  input:      {ipa!r}")
+        if d["normalized"] != ipa:
+            print(f"  normalized: {d['normalized']!r}")
+        print(f"  segments ({d['n_featurized']}/{d['n_segments']} featurized):")
+        for p in d["segments"]:
+            mark = "✓" if p["featurized"] else "✗"
+            print(f"    {mark} {p['segment']!r} ({p['n_codepoints']} codepoints)")
+
+    print(f"\n{'─' * 70}")
+    print("Interpretation:")
+    print("  ✓ If 'dict-style' and 'ZIPA-style' produce IDENTICAL segments,")
+    print("    Option B (panphon's diacritic grouping) works for both inputs.")
+    print("  ✗ If a base+diacritic splits into separate segments and the")
+    print("    diacritic doesn't featurize, the script falls back to Option A")
+    print("    (skip) — DTW absorbs the gap. Recall may still be high but")
+    print("    the framework is doing more lifting via DTW alignment.")
+    print(f"{'─' * 70}\n")
 
 
 # ─── Main ────────────────────────────────────────────────────────────────
@@ -567,6 +650,10 @@ def main():
     )
     p.add_argument("--build", action="store_true",
                    help="Build the IPA dictionary index (one-time, ~1 min)")
+    p.add_argument("--diagnose", action="store_true",
+                   help="Print panphon segmentation for sample inputs and "
+                        "exit. Run this BEFORE trusting recall numbers — it "
+                        "verifies that diacritics group correctly.")
     p.add_argument("--source", choices=["tsv", "bangla-pkg"], default="tsv",
                    help="Where to read the lexicon from. 'tsv' (default) reads "
                         "all *.tsv files in --tsv-dir (the format produced by "
@@ -594,6 +681,11 @@ def main():
     args = p.parse_args()
 
     fs = FeatureSpace()
+
+    # ─── Diagnose-only fast path ──────────────────────────────────────
+    if args.diagnose:
+        run_diagnose(fs)
+        return
 
     # ─── Load or build the dictionary index ───────────────────────────
     if args.build or not CACHE_INDEX.exists():

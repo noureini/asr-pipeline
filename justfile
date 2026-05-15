@@ -94,6 +94,10 @@ phys-build-lexicon:
 phys-build:
     uv run python scripts/test_phys_lattice_recall.py --build
 
+# Verify panphon's diacritic grouping handles ZIPA-style tokens
+phys-diagnose:
+    uv run python scripts/test_phys_lattice_recall.py --diagnose
+
 # Recall@K sanity check — clean IPA (should be ~100%)
 phys-recall-clean n="500":
     uv run python scripts/test_phys_lattice_recall.py --mode clean --n {{n}}
