@@ -84,6 +84,24 @@ translate file lang="bn" *flags:
 transcribe-folder folder lang="bn" *flags:
     uv run asr-pipeline transcribe "{{folder}}" --language {{lang}} {{flags}}
 
+# ─── Research experiments ─────────────────────────────────────────────────
+
+# Build the IPA dictionary index (one-time, ~1 min)
+phys-build:
+    uv run python scripts/test_phys_lattice_recall.py --build
+
+# Recall@K sanity check — clean IPA (should be ~100%)
+phys-recall-clean n="500":
+    uv run python scripts/test_phys_lattice_recall.py --mode clean --n {{n}}
+
+# Recall@K with synthetic ZIPA-style noise — the decisive number
+phys-recall n="500":
+    uv run python scripts/test_phys_lattice_recall.py --mode noisy --n {{n}}
+
+# Recall@K on your own (gold, ZIPA-output) JSONL pairs
+phys-recall-jsonl path n="500":
+    uv run python scripts/test_phys_lattice_recall.py --mode jsonl --test-jsonl "{{path}}" --n {{n}}
+
 # ─── Maintenance ──────────────────────────────────────────────────────────
 
 # Show CUDA / GPU status
