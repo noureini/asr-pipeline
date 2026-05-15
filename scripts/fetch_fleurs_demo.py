@@ -26,8 +26,66 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import sys
 from pathlib import Path
+
+
+def _ensure_cudnn_on_ld_path():
+    """torch (pulled in by datasets audio decoding) needs libcudnn.so.9.
+    The venv ships nvidia-cudnn-cu12 but its lib dir isn't on
+    LD_LIBRARY_PATH. The dynamic linker reads LD_LIBRARY_PATH at process
+    start, so we set it and re-exec once."""
+    if os.environ.get("_FLEURS_CUDNN_FIXED") == "1":
+        return
+    candidates = []
+    for base in sys.path:
+        p = Path(base) / "nvidia" / "cudnn" / "lib"
+        if p.is_dir():
+            candidates.append(str(p))
+        # also probe site-packages siblings
+    # Fallback: glob the venv
+    if not candidates:
+        for sp in Path(sys.prefix).rglob("nvidia/cudnn/lib"):
+            candidates.append(str(sp))
+            break
+    if not candidates:
+        return  # nothing to do; let it fail with the clear error
+    new_ld = os.pathsep.join(candidates + [os.environ.get("LD_LIBRARY_PATH", "")])
+    os.environ["LD_LIBRARY_PATH"] = new_ld.strip(os.pathsep)
+    os.environ["_FLEURS_CUDNN_FIXED"] = "1"
+    os.execv(sys.executable, [sys.executable] + sys.argv)
+
+
+_ensure_cudnn_on_ld_path()
+
+
+def _load_hf_token():
+    """Pull HF token from env or .env files (8 common var names)."""
+    keys = ("HF_TOKEN", "HUGGING_FACE_HUB_TOKEN", "HUGGINGFACE_TOKEN",
+            "HF_HUB_TOKEN", "HUGGINGFACE_HUB_TOKEN", "HUGGING_FACE_TOKEN",
+            "HF_API_TOKEN", "HUGGINGFACEHUB_API_TOKEN")
+    for k in keys:
+        v = os.environ.get(k)
+        if v:
+            os.environ.setdefault("HF_TOKEN", v)
+            return v
+    for env_path in (Path(".env"),
+                     Path(__file__).parent.parent / ".env",
+                     Path.home() / ".env"):
+        if not env_path.exists():
+            continue
+        for line in env_path.read_text(encoding="utf-8").splitlines():
+            line = line.strip()
+            if not line or line.startswith("#") or "=" not in line:
+                continue
+            key, _, val = line.partition("=")
+            if key.strip().upper() in keys:
+                tok = val.strip().strip('"').strip("'")
+                os.environ["HF_TOKEN"] = tok
+                os.environ["HUGGING_FACE_HUB_TOKEN"] = tok
+                return tok
+    return None
 
 
 FLEURS_BN = "bn_in"  # FLEURS Bengali (India) config id
@@ -55,24 +113,34 @@ def main():
     args = p.parse_args()
 
     try:
-        from datasets import load_dataset
+        from datasets import load_dataset, Audio
         import soundfile as sf
         import numpy as np
+        import io
     except ImportError as e:
         print(f"ERROR: missing dependency ({e}).")
         print("These ship with the project: uv sync")
         sys.exit(1)
 
+    tok = _load_hf_token()
+    print(f"HF token: {'found' if tok else 'NOT found (public dataset, ok)'}")
     print(f"Loading FLEURS {FLEURS_BN} [{args.split}] (streaming)...")
     try:
         ds = load_dataset(
             "google/fleurs", FLEURS_BN,
             split=args.split, streaming=True,
             trust_remote_code=True,
+            token=tok,
         )
+        # Disable datasets' built-in audio decoding (which drags in
+        # torchcodec -> libcudnn). We decode the raw bytes with
+        # soundfile ourselves below — no torch needed.
+        ds = ds.cast_column("audio", Audio(decode=False))
     except Exception as e:
         print(f"ERROR loading FLEURS: {e}")
-        print("If this is an auth error, set HF_TOKEN in .env.")
+        print("If auth error: set HF_TOKEN in .env or environment.")
+        print("If libcudnn error persists: the venv's nvidia-cudnn-cu12 "
+              "may be missing — run `uv sync`.")
         sys.exit(1)
 
     audio_dir = args.out / "audio"
@@ -93,8 +161,22 @@ def main():
                       or ex.get("raw_transcription") or "").strip()
         if audio is None or not transcript:
             continue
-        wav = np.asarray(audio["array"], dtype="float32")
-        sr = int(audio["sampling_rate"])
+        # decode=False -> audio is {"bytes": ..., "path": ...}
+        try:
+            if audio.get("bytes"):
+                wav, sr = sf.read(io.BytesIO(audio["bytes"]), dtype="float32")
+            elif audio.get("path"):
+                wav, sr = sf.read(audio["path"], dtype="float32")
+            else:
+                continue
+        except Exception as e:
+            print(f"  skip (decode error: {e})")
+            continue
+        # Stereo -> mono
+        if wav.ndim > 1:
+            wav = wav.mean(axis=1)
+        wav = np.asarray(wav, dtype="float32")
+        sr = int(sr)
         dur = len(wav) / sr if sr else 0.0
         if dur < args.min_dur or dur > args.max_dur:
             continue
