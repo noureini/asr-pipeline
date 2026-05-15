@@ -717,6 +717,14 @@ def main():
         else:
             idx = build_from_bangla_ipa(fs, max_words=args.max_words)
         save_index(idx, cache_path)
+        # If user explicitly asked to build, exit here. They run the
+        # test as a separate command (with --mode clean / noisy / jsonl).
+        if args.build:
+            print(f"\nIndex built. Run the test with one of:")
+            bn = " --bengali-only" if args.bengali_only else ""
+            print(f"  uv run python scripts/test_phys_lattice_recall.py{bn} --mode clean")
+            print(f"  uv run python scripts/test_phys_lattice_recall.py{bn} --mode noisy")
+            return
     else:
         idx = load_index(cache_path)
 
