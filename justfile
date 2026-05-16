@@ -170,6 +170,10 @@ fetch-fleurs-demo n="10":
 check-qwen-asr *flags:
     uv run python scripts/check_qwen_asr_bengali.py {{flags}}
 
+# Validate Omnilingual on all 10 FLEURS Bengali clips (CER table)
+eval-omni-fleurs10 *flags:
+    uv run python scripts/eval_omni_fleurs10.py {{flags}}
+
 # ─── Maintenance ──────────────────────────────────────────────────────────
 
 # Show CUDA / GPU status
