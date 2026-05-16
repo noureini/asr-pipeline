@@ -168,9 +168,34 @@ class TranslateGemmaConfig(BaseModel):
     quantize: Optional[Literal["4bit", "8bit"]] = "4bit"  # None = full precision
 
 
+class QwenCorrectorConfig(BaseModel):
+    """Local Qwen3.5-dense corrector for the SOURCE-language transcript.
+
+    Runs BEFORE translation. Fixes ASR recognition errors and restores
+    code-switched English written in Bengali script, WITHOUT inventing
+    content or translating. Served via local Ollama (private, no cloud).
+
+    Disabled by default — current pipeline leaves corrected_text = raw.
+    Enable only after the ASR engine is validated on real audio.
+    """
+
+    enabled: bool = False
+    model: str = "qwen2.5:7b"            # local Ollama Qwen3.5-dense tag
+    base_url: str = "http://localhost:11434"
+    temperature: float = 0.0            # deterministic — no creative drift
+    max_tokens: int = 1024
+    # True = keep speaker's colloquial/regional forms (verbatim survey).
+    # False = standardize to literary Bengali.
+    preserve_register: bool = True
+
+
 class PostprocessingConfig(BaseModel):
     translation_backend: Literal["translategemma", "ct2_nllb"] = "translategemma"
     translategemma: TranslateGemmaConfig = Field(default_factory=TranslateGemmaConfig)
+    # Source-text corrector (runs before translation). "none" = current
+    # behavior (no source correction). "qwen" = local Qwen3.5 corrector.
+    correction_backend: Literal["none", "qwen"] = "none"
+    qwen_corrector: QwenCorrectorConfig = Field(default_factory=QwenCorrectorConfig)
     # Below configs used only with ct2_nllb backend
     correction: CorrectionConfig = Field(default_factory=CorrectionConfig)
     translation: TranslationConfig = Field(default_factory=TranslationConfig)

@@ -318,6 +318,20 @@ alignment:
 postprocessing:
   translation_backend: "translategemma"  # "translategemma" (default) or "ct2_nllb" (legacy)
 
+  # Source-text corrector — runs BEFORE translation. Fixes ASR errors +
+  # restores code-switched English in the Bengali transcript.
+  #   "none" (default) = no source correction (corrected_text = raw)
+  #   "qwen"            = local Qwen3.5-dense via Ollama (private)
+  # Enable ONLY after the ASR engine is validated on real audio.
+  correction_backend: "none"
+  qwen_corrector:
+    enabled: false
+    model: "qwen2.5:7b"               # local Ollama Qwen3.5-dense tag
+    base_url: "http://localhost:11434"
+    temperature: 0.0                  # deterministic, no creative drift
+    max_tokens: 1024
+    preserve_register: true           # keep colloquial/dialect verbatim
+
   # TranslateGemma 4B — single model for translation + English cleanup
   # Auto-downloads from HuggingFace on first run (~3 GB).
   # Handles all languages (55 supported) including English→English cleanup.

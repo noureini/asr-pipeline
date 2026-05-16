@@ -141,6 +141,117 @@ class OllamaProcessor:
 
 
 # =============================================================================
+# Qwen3.5 Source-Text Corrector (runs BEFORE translation)
+# =============================================================================
+
+
+class QwenCorrector:
+    """Local Qwen3.5-dense corrector for the source-language transcript.
+
+    Fixes ASR recognition errors and restores code-switched English
+    written phonetically in Bengali script — WITHOUT inventing content,
+    translating, or (optionally) altering the speaker's register.
+
+    Served via local Ollama (private; nothing leaves the machine).
+    Composes OllamaProcessor for connectivity + generation.
+    """
+
+    # Validated constrained prompt (n=6 synthetic probe: 0 hallucinations,
+    # correct brand/admin-term judgment). {register} swaps the dialect rule.
+    _PROMPT = (
+        "You are correcting a Bengali speech-to-text transcript. The "
+        "recognizer makes phonetic errors and writes spoken English words "
+        "in Bengali script.\n"
+        "Rules:\n"
+        "1. Fix obvious recognition errors (wrong/garbled characters).\n"
+        "2. Restore code-switched English words to correct English "
+        "spelling (e.g. ভেকসিন -> vaccine, বিকাশ brand -> bKash).\n"
+        "3. Keep genuine Bengali words and Bengali administrative terms "
+        "in Bengali (e.g. ইউনিয়ন পরিষদ stays Bengali).\n"
+        "4. Do NOT add information. Do NOT translate. Do NOT change "
+        "meaning. Do NOT invent words. If a span is unintelligible, "
+        "leave it unchanged.\n"
+        "{register}\n"
+        "Output ONLY the corrected transcript on one line, nothing else.\n\n"
+        "Transcript: {text}\n"
+        "Corrected:"
+    )
+    _REGISTER_PRESERVE = (
+        "5. Preserve the speaker's colloquial and regional forms exactly "
+        "(e.g. keep পাঠাইছি, নাই, দিছি — do NOT standardize grammar)."
+    )
+    _REGISTER_STANDARD = (
+        "5. You may normalize colloquial forms to standard Bengali."
+    )
+
+    def __init__(
+        self,
+        model: str = "qwen2.5:7b",
+        base_url: str = "http://localhost:11434",
+        temperature: float = 0.0,
+        max_tokens: int = 1024,
+        preserve_register: bool = True,
+    ) -> None:
+        self._llm = OllamaProcessor(model=model, base_url=base_url)
+        self._temperature = temperature
+        self._max_tokens = max_tokens
+        self._register = (
+            self._REGISTER_PRESERVE if preserve_register
+            else self._REGISTER_STANDARD
+        )
+        self._model_name = model
+
+    def load(self) -> bool:
+        ok = self._llm.load()
+        if ok:
+            logger.info(
+                f"  ✓ QwenCorrector ready (model {self._model_name}, "
+                f"register={'preserve' if self._register is self._REGISTER_PRESERVE else 'standard'})"
+            )
+        else:
+            logger.warning(
+                "  QwenCorrector: Ollama/model unavailable — source "
+                "correction will be SKIPPED (raw text passes through)."
+            )
+        return ok
+
+    def unload(self) -> None:
+        self._llm.unload()
+
+    @property
+    def is_loaded(self) -> bool:
+        return self._llm.is_loaded
+
+    def correct(self, texts: list[str]) -> list[str]:
+        """Correct each transcript. On any failure, fall back to the
+        original text for that segment (never drop content)."""
+        if not self._llm.is_loaded:
+            return list(texts)
+        out: list[str] = []
+        for t in texts:
+            src = (t or "").strip()
+            if not src:
+                out.append(t)
+                continue
+            prompt = self._PROMPT.format(register=self._register, text=src)
+            try:
+                resp = self._llm.generate(
+                    prompt,
+                    temperature=self._temperature,
+                    max_tokens=self._max_tokens,
+                ).strip()
+            except Exception as e:
+                logger.warning(f"  QwenCorrector failed on a segment: {e}")
+                resp = ""
+            # Guard against empty / refusal / runaway output: fall back.
+            if not resp or len(resp) > max(40, len(src) * 4):
+                out.append(t)
+            else:
+                out.append(resp)
+        return out
+
+
+# =============================================================================
 # CTranslate2 NLLB Translator (Stage 1)
 # =============================================================================
 
@@ -666,8 +777,24 @@ class PostProcessor:
             base_url=config.correction.base_url,
         )
 
+        # Source-text corrector (runs before translation). Default off.
+        self._qwen_corrector: Optional[QwenCorrector] = None
+        if config.correction_backend == "qwen":
+            qc = config.qwen_corrector
+            self._qwen_corrector = QwenCorrector(
+                model=qc.model,
+                base_url=qc.base_url,
+                temperature=qc.temperature,
+                max_tokens=qc.max_tokens,
+                preserve_register=qc.preserve_register,
+            )
+
     def load(self) -> None:
         """Load post-processing models based on the active backend."""
+        # Source corrector (independent of translation backend)
+        if self._qwen_corrector is not None:
+            self._qwen_corrector.load()
+
         backend = self._config.translation_backend
 
         if backend == "translategemma":
@@ -687,6 +814,8 @@ class PostProcessor:
         self._translategemma.unload()
         self._translator.unload()
         self._llm.unload()
+        if self._qwen_corrector is not None:
+            self._qwen_corrector.unload()
 
     def process(
         self,
@@ -712,18 +841,36 @@ class PostProcessor:
             is_high = lang_config.tier == LanguageTier.HIGH
             lang_configs.append((lang_config, is_english, is_high))
 
+        # ── Source-text correction (before translation) ─────────────
+        # Default off: corrected == raw (unchanged pipeline behavior).
+        if (self._qwen_corrector is not None
+                and self._qwen_corrector.is_loaded):
+            corrected_texts = self._qwen_corrector.correct(
+                [s.raw_text for s in segments]
+            )
+            # Translation should operate on the CORRECTED text. Use
+            # shallow copies so the original raw_text is preserved for
+            # the ProcessedSegment.raw_text field.
+            tx_segments = [
+                s.model_copy(update={"raw_text": ct})
+                for s, ct in zip(segments, corrected_texts)
+            ]
+        else:
+            corrected_texts = [s.raw_text for s in segments]
+            tx_segments = segments
+
         backend = self._config.translation_backend
 
         if backend == "translategemma":
             # Single-pass: TranslateGemma handles translation + refinement
-            translations = self._pass_translategemma(segments, lang_configs)
+            translations = self._pass_translategemma(tx_segments, lang_configs)
             # For TranslateGemma, translation IS the refined output
             refined_translations = translations
         else:
             # Legacy: CT2 translate → Ollama refine
-            translations = self._pass_translation(segments, lang_configs)
+            translations = self._pass_translation(tx_segments, lang_configs)
             refined_translations = self._pass_joint_refinement(
-                segments, translations, lang_configs
+                tx_segments, translations, lang_configs
             )
 
         # ── Build results ────────────────────────────────────────────
@@ -737,7 +884,7 @@ class PostProcessor:
                     speaker_id=seg.speaker_id,
                     language=seg.language,
                     raw_text=seg.raw_text,
-                    corrected_text=seg.raw_text,
+                    corrected_text=corrected_texts[i],
                     english_translation=translations[i],
                     refined_translation=refined_translations[i],
                     confidence=seg.confidence,
