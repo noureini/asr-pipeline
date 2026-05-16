@@ -18,7 +18,7 @@ dependencies = [
     # ASR engines
     "faster-whisper>=1.0.0",
     "omnilingual-asr>=0.1.0",
-    "qwen-asr>=0.1.0",
+    "qwen-asr>=0.0.6",
     # Speaker diarization
     # Pinned to 3.x — pyannote 4.0 requires numpy>=2.0 which conflicts
     # with fairseq2 (omnilingual-asr dependency, needs numpy<2.0).
