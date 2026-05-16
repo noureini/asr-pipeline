@@ -273,17 +273,18 @@ omnilingual:
   max_audio_length_s: 40            # Omnilingual limit per chunk
 
 # ---------------------------------------------------------------------------
-# Qwen3-ASR engine — DEFAULT for non-high-resource languages
+# Qwen3-ASR engine — OPT-IN ONLY (not the default)
 # ---------------------------------------------------------------------------
-# Replaces Omnilingual as the production default. Bengali is not in
-# Qwen3-ASR's official language list but the model produces usable
-# Bengali (validated ~8.5% CER on FLEURS). Omnilingual config above is
-# retained and still usable via an explicit config override.
+# NOT the production default. Qwen3-ASR-1.7B (local, open weights) does
+# NOT support Bengali — it transcribes Bengali audio as Hindi/Devanagari
+# (~34% CER). The good Bengali Qwen-ASR is Qwen3-ASR-Flash, which is
+# DashScope cloud-API only (no weights) and therefore unusable for
+# survey PII. Omnilingual is the production default (see config.py
+# engine_for_language; ~6.8% CER local on FLEURS Bengali). This section
+# is kept for the research/FLEURS track and engine A/B via force_engine.
 qwen:
   model: "Qwen/Qwen3-ASR-1.7B"
-  # null = auto-detect, but 1.7B auto-detects Bengali as Hindi
-  # (Devanagari). Force the hint to test if it can do Bengali at all.
-  language: "Bengali"
+  language: "Bengali"                # hint; 1.7B still lacks real Bengali
   dtype: "bfloat16"                  # bfloat16 | float16 | float32
   device_map: "cuda:0"               # "cpu" for CPU-only boxes
   max_audio_length_s: 30             # per-chunk limit

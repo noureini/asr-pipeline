@@ -238,7 +238,12 @@ class AppConfig(BaseModel):
             return "whisper"
         if self.pipeline.force_engine:
             return self.pipeline.force_engine
-        return "qwen"
+        # Default for non-high-resource: Omnilingual. Measured ~6.8% CER
+        # (num-normalized) on FLEURS Bengali, fully local/private —
+        # vs Qwen3-ASR-1.7B's 34% (no Bengali) and Qwen-Flash being
+        # cloud-only (unusable for survey PII). Override with
+        # pipeline.force_engine for A/B testing.
+        return "omnilingual"
 
 
 # =============================================================================
