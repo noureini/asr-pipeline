@@ -184,34 +184,27 @@ class QwenCorrector:
         "5. You may normalize colloquial forms to standard Bengali."
     )
 
-    def __init__(
-        self,
-        model: str = "qwen2.5:7b",
-        base_url: str = "http://localhost:11434",
-        temperature: float = 0.0,
-        max_tokens: int = 1024,
-        preserve_register: bool = True,
-    ) -> None:
-        self._llm = OllamaProcessor(model=model, base_url=base_url)
-        self._temperature = temperature
-        self._max_tokens = max_tokens
+    def __init__(self, cfg) -> None:
+        self._llm = _make_qwen_llm(cfg)
+        self._temperature = cfg.temperature
+        self._max_tokens = cfg.max_tokens
         self._register = (
-            self._REGISTER_PRESERVE if preserve_register
+            self._REGISTER_PRESERVE if cfg.preserve_register
             else self._REGISTER_STANDARD
         )
-        self._model_name = model
+        self._backend = cfg.backend
 
     def load(self) -> bool:
         ok = self._llm.load()
         if ok:
             logger.info(
-                f"  ✓ QwenCorrector ready (model {self._model_name}, "
+                f"  ✓ QwenCorrector ready ({self._backend}, "
                 f"register={'preserve' if self._register is self._REGISTER_PRESERVE else 'standard'})"
             )
         else:
             logger.warning(
-                "  QwenCorrector: Ollama/model unavailable — source "
-                "correction will be SKIPPED (raw text passes through)."
+                "  QwenCorrector: model unavailable — source correction "
+                "SKIPPED (raw text passes through unchanged)."
             )
         return ok
 
@@ -251,6 +244,114 @@ class QwenCorrector:
         return out
 
 
+class GGUFProcessor:
+    """Local in-process LLM via llama-cpp-python (GGUF). No daemon.
+
+    Drop-in for OllamaProcessor: same .load()/.is_loaded/.generate
+    interface so QwenCorrector/QwenTranslator are backend-agnostic.
+    """
+
+    def __init__(
+        self,
+        gguf_path: Optional[str] = None,
+        gguf_repo: Optional[str] = None,
+        gguf_file: Optional[str] = None,
+        n_gpu_layers: int = -1,
+        n_ctx: int = 4096,
+        n_threads: int = 8,
+    ) -> None:
+        self._path = gguf_path
+        self._repo = gguf_repo
+        self._file = gguf_file
+        self._n_gpu_layers = n_gpu_layers
+        self._n_ctx = n_ctx
+        self._n_threads = n_threads
+        self._llm: Optional[object] = None
+        self._available = False
+
+    def load(self) -> bool:
+        try:
+            from llama_cpp import Llama
+        except ImportError:
+            logger.warning(
+                "  llama-cpp-python not installed — GGUF backend "
+                "unavailable. uv pip install llama-cpp-python "
+                "(or use backend: ollama)."
+            )
+            return False
+        try:
+            common = dict(
+                n_ctx=self._n_ctx,
+                n_threads=self._n_threads,
+                n_gpu_layers=self._n_gpu_layers,
+                verbose=False,
+            )
+            if self._path:
+                self._llm = Llama(model_path=str(self._path), **common)
+            elif self._repo and self._file:
+                # One-time HF download into the local cache, then local.
+                self._llm = Llama.from_pretrained(
+                    repo_id=self._repo, filename=self._file, **common
+                )
+            else:
+                logger.warning(
+                    "  GGUF backend: set gguf_path OR "
+                    "gguf_repo+gguf_file. Skipping."
+                )
+                return False
+            self._available = True
+            logger.info("  ✓ GGUF model loaded (llama.cpp, in-process)")
+            return True
+        except Exception as e:
+            logger.warning(f"  Failed to load GGUF model: {e}")
+            return False
+
+    def unload(self) -> None:
+        self._llm = None
+        self._available = False
+
+    @property
+    def is_loaded(self) -> bool:
+        return self._available
+
+    def generate(
+        self,
+        prompt: str,
+        temperature: float = 0.0,
+        max_tokens: int = 1024,
+    ) -> str:
+        if not self._available or self._llm is None:
+            return ""
+        try:
+            out = self._llm.create_completion(  # type: ignore[union-attr]
+                prompt,
+                temperature=temperature,
+                max_tokens=max_tokens,
+                stop=["</output>", "\n\n\n"],
+            )
+            return out["choices"][0]["text"].strip()
+        except Exception as e:
+            logger.warning(f"  GGUF generation failed: {e}")
+            return ""
+
+
+def _make_qwen_llm(cfg):
+    """Build the right local LLM client for a Qwen post-processing
+    stage from its config (backend: gguf | ollama). Both are local."""
+    if getattr(cfg, "backend", "gguf") == "ollama":
+        return OllamaProcessor(
+            model=cfg.ollama_model, base_url=cfg.ollama_base_url
+        )
+    return GGUFProcessor(
+        gguf_path=cfg.gguf_path,
+        gguf_repo=cfg.gguf_repo,
+        gguf_file=cfg.gguf_file,
+        n_gpu_layers=cfg.n_gpu_layers,
+        n_ctx=cfg.n_ctx,
+        n_threads=cfg.n_threads,
+    )
+
+
 class QwenTranslator:
     """Local Qwen3.5-dense translator: (corrected) Bengali -> English.
 
@@ -271,25 +372,19 @@ class QwenTranslator:
         "English:"
     )
 
-    def __init__(
-        self,
-        model: str = "qwen2.5:7b",
-        base_url: str = "http://localhost:11434",
-        temperature: float = 0.0,
-        max_tokens: int = 1024,
-    ) -> None:
-        self._llm = OllamaProcessor(model=model, base_url=base_url)
-        self._temperature = temperature
-        self._max_tokens = max_tokens
-        self._model_name = model
+    def __init__(self, cfg) -> None:
+        self._llm = _make_qwen_llm(cfg)
+        self._temperature = cfg.temperature
+        self._max_tokens = cfg.max_tokens
+        self._backend = cfg.backend
 
     def load(self) -> bool:
         ok = self._llm.load()
         if ok:
-            logger.info(f"  ✓ QwenTranslator ready (model {self._model_name})")
+            logger.info(f"  ✓ QwenTranslator ready ({self._backend})")
         else:
             logger.warning(
-                "  QwenTranslator: Ollama/model unavailable — translation "
+                "  QwenTranslator: model unavailable — translation "
                 "will be empty for affected segments."
             )
         return ok
@@ -852,25 +947,12 @@ class PostProcessor:
         # Qwen translator (local; selected via translation_backend="qwen")
         self._qwen_translator: Optional[QwenTranslator] = None
         if config.translation_backend == "qwen":
-            qt = config.qwen_translator
-            self._qwen_translator = QwenTranslator(
-                model=qt.model,
-                base_url=qt.base_url,
-                temperature=qt.temperature,
-                max_tokens=qt.max_tokens,
-            )
+            self._qwen_translator = QwenTranslator(config.qwen_translator)
 
-        # Source-text corrector (runs before translation). Default off.
+        # Source-text corrector (runs before translation).
         self._qwen_corrector: Optional[QwenCorrector] = None
         if config.correction_backend == "qwen":
-            qc = config.qwen_corrector
-            self._qwen_corrector = QwenCorrector(
-                model=qc.model,
-                base_url=qc.base_url,
-                temperature=qc.temperature,
-                max_tokens=qc.max_tokens,
-                preserve_register=qc.preserve_register,
-            )
+            self._qwen_corrector = QwenCorrector(config.qwen_corrector)
 
     def load(self) -> None:
         """Load post-processing models based on the active backend."""

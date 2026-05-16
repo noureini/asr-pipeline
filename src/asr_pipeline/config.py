@@ -168,48 +168,69 @@ class TranslateGemmaConfig(BaseModel):
     quantize: Optional[Literal["4bit", "8bit"]] = "4bit"  # None = full precision
 
 
-class QwenCorrectorConfig(BaseModel):
-    """Local Qwen3.5-dense corrector for the SOURCE-language transcript.
+class QwenLLMConfig(BaseModel):
+    """Shared local-LLM backend config for the Qwen post-processing
+    stages. Two backends, both fully local/private:
+
+      gguf (default)  — llama.cpp in-process, no daemon, pinned file.
+                         Set gguf_path (local file) OR gguf_repo+
+                         gguf_file (HF auto-download once).
+      ollama          — external `ollama serve` daemon.
+    """
+
+    backend: Literal["gguf", "ollama"] = "gguf"
+    # ── gguf backend ──
+    gguf_path: Optional[str] = None      # explicit local .gguf (preferred)
+    gguf_repo: Optional[str] = None      # e.g. "Qwen/Qwen3.5-9B-GGUF"
+    gguf_file: Optional[str] = None      # e.g. "qwen3.5-9b-q4_k_m.gguf"
+    n_gpu_layers: int = -1               # -1 = all on GPU, 0 = CPU
+    n_ctx: int = 4096
+    n_threads: int = 8
+    # ── ollama backend ──
+    ollama_model: str = "qwen3.5:9b"
+    ollama_base_url: str = "http://localhost:11434"
+    # ── generation ──
+    temperature: float = 0.0             # deterministic — no creative drift
+    max_tokens: int = 1024
+
+
+class QwenCorrectorConfig(QwenLLMConfig):
+    """Qwen3.5-dense corrector for the SOURCE-language transcript.
 
     Runs BEFORE translation. Fixes ASR recognition errors and restores
     code-switched English written in Bengali script, WITHOUT inventing
-    content or translating. Served via local Ollama (private, no cloud).
+    content or translating. Fully local (no cloud).
 
-    Disabled by default — current pipeline leaves corrected_text = raw.
-    Enable only after the ASR engine is validated on real audio.
+    Active by default now (Gemma replaced). Still must be measured on
+    real Omnilingual output before production sign-off.
     """
 
-    enabled: bool = False
-    model: str = "qwen2.5:7b"            # local Ollama Qwen3.5-dense tag
-    base_url: str = "http://localhost:11434"
-    temperature: float = 0.0            # deterministic — no creative drift
-    max_tokens: int = 1024
+    enabled: bool = True
     # True = keep speaker's colloquial/regional forms (verbatim survey).
     # False = standardize to literary Bengali.
     preserve_register: bool = True
 
 
-class QwenTranslatorConfig(BaseModel):
-    """Local Qwen3.5-dense translator (corrected Bengali -> English).
+class QwenTranslatorConfig(QwenLLMConfig):
+    """Qwen3.5-dense translator (corrected Bengali -> English).
 
-    Served via local Ollama (private). Faithful translation only —
-    no summarizing, no added content; English/brand/number spans kept.
-    Replaces the (broken) TranslateGemma stage when selected.
+    Fully local (gguf or ollama). Faithful translation only — no
+    summarizing, no added content; English/brand/number spans kept.
+    Replaces the (broken) TranslateGemma stage.
     """
-
-    model: str = "qwen2.5:7b"            # local Ollama Qwen3.5-dense tag
-    base_url: str = "http://localhost:11434"
-    temperature: float = 0.0
-    max_tokens: int = 1024
+    pass
 
 
 class PostprocessingConfig(BaseModel):
-    translation_backend: Literal["translategemma", "ct2_nllb", "qwen"] = "translategemma"
+    # Gemma fully replaced: Qwen3.5-dense (local GGUF) is now the
+    # default. TranslateGemma was non-functional upstream (model repo
+    # mismatch); ct2_nllb kept only as a legacy fallback option.
+    translation_backend: Literal["qwen", "translategemma", "ct2_nllb"] = "qwen"
     translategemma: TranslateGemmaConfig = Field(default_factory=TranslateGemmaConfig)
     qwen_translator: QwenTranslatorConfig = Field(default_factory=QwenTranslatorConfig)
-    # Source-text corrector (runs before translation). "none" = current
-    # behavior (no source correction). "qwen" = local Qwen3.5 corrector.
-    correction_backend: Literal["none", "qwen"] = "none"
+    # Source-text corrector (runs before translation).
+    # "qwen" = local Qwen3.5 corrector (default). "none" = skip.
+    correction_backend: Literal["qwen", "none"] = "qwen"
     qwen_corrector: QwenCorrectorConfig = Field(default_factory=QwenCorrectorConfig)
     # Below configs used only with ct2_nllb backend
     correction: CorrectionConfig = Field(default_factory=CorrectionConfig)
