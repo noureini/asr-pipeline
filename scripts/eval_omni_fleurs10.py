@@ -98,6 +98,8 @@ def main():
     p.add_argument("--skip-run", action="store_true",
                    help="Don't re-run the pipeline; just score existing "
                         "JSON in --out-dir (for re-scoring)")
+    p.add_argument("--max", type=int, default=0,
+                   help="Quick test: only the first N clips (0 = all 10)")
     args = p.parse_args()
 
     refs_path = args.demo_dir / "references.json"
@@ -109,18 +111,23 @@ def main():
             for r in json.loads(refs_path.read_text(encoding="utf-8"))}
     args.out_dir.mkdir(parents=True, exist_ok=True)
 
+    files = sorted(refs)
+    if args.max and args.max > 0:
+        files = files[:args.max]
+        print(f"QUICK TEST: first {len(files)} clip(s) only\n")
+
     rows = []
     t0 = time.time()
-    for i, fname in enumerate(sorted(refs), 1):
+    for i, fname in enumerate(files, 1):
         wav = audio_dir / fname
         stem = Path(fname).stem
         out_json = args.out_dir / f"{stem}.json"
 
         if not args.skip_run:
             if not wav.exists():
-                print(f"  [{i}/10] {fname}: MISSING audio, skip")
+                print(f"  [{i}/{len(files)}] {fname}: MISSING audio, skip")
                 continue
-            print(f"  [{i}/10] transcribing {fname} ...", flush=True)
+            print(f"  [{i}/{len(files)}] transcribing {fname} ...", flush=True)
             cmd = [
                 "uv", "run", "asr-pipeline", "transcribe", str(wav),
                 "-l", "ben", "-c", args.config,
