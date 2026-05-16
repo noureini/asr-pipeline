@@ -359,15 +359,14 @@ class QwenTranslator:
     Per-segment fallback to '' on failure (never fabricates).
     """
 
+    # User-specified lean prompt + 2 retained safeguards:
+    #   - keep English/brands/numbers (code-switch fidelity = the point)
+    #   - output-only (so no preamble pollutes the [en] line)
     _PROMPT = (
-        "Translate the following Bengali text to natural English.\n"
-        "Rules:\n"
-        "1. Translate faithfully — do NOT summarize, omit, or add "
-        "information.\n"
-        "2. Keep English words, brand names, numbers, and proper nouns "
-        "as they are.\n"
-        "3. Output ONLY the English translation on one line, nothing "
-        "else (no notes, no quotes).\n\n"
+        "Translate this Bengali text to English. Translate faithfully — "
+        "do not add interpretation, summarize, or omit. Keep English "
+        "words, brand names, numbers, and proper nouns exactly as they "
+        "are. Output only the English translation, nothing else.\n\n"
         "Bengali: {text}\n"
         "English:"
     )
