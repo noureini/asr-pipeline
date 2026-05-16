@@ -37,6 +37,10 @@ class PipelineConfig(BaseModel):
     num_workers: int = 4
     output_dir: str = "./outputs"
     low_vram: bool = False  # Sequential execution: load/unload one model at a time
+    # Force the ASR engine for non-high-resource languages, overriding
+    # the default tier routing. One of: "qwen", "omnilingual", "whisper".
+    # null = use default routing (non-high -> qwen).
+    force_engine: Optional[str] = None
 
 
 class LoudnessConfig(BaseModel):
@@ -232,6 +236,8 @@ class AppConfig(BaseModel):
         lang = self.get_language(code)
         if lang.tier == LanguageTier.HIGH:
             return "whisper"
+        if self.pipeline.force_engine:
+            return self.pipeline.force_engine
         return "qwen"
 
 
