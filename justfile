@@ -166,6 +166,10 @@ phys-recall-jsonl path n="500":
 fetch-fleurs-demo n="10":
     uv run python scripts/fetch_fleurs_demo.py --n {{n}}
 
+# Check if Qwen3-ASR-1.7B is usable for Bengali (load-bearing test)
+check-qwen-asr *flags:
+    uv run python scripts/check_qwen_asr_bengali.py {{flags}}
+
 # ─── Maintenance ──────────────────────────────────────────────────────────
 
 # Show CUDA / GPU status
