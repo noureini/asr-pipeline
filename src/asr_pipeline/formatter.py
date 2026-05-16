@@ -186,8 +186,16 @@ def format_txt(
                 # English-only: just show corrected text
                 lines.append(f"{seg.corrected_text}")
             else:
-                # Multilingual: show original language + translation
+                # Multilingual: raw ASR (audit) → corrected → translation
                 if include_raw:
+                    # Show raw ASR only when the corrector changed it,
+                    # so reviewers can audit every LLM edit (and spot
+                    # hallucination/over-correction). No redundant dup
+                    # when correction was a no-op.
+                    raw = (seg.raw_text or "").strip()
+                    corr = (seg.corrected_text or "").strip()
+                    if raw and raw != corr:
+                        lines.append(f"[{lang_tag}-raw] {seg.raw_text}")
                     lines.append(f"[{lang_tag}] {seg.corrected_text}")
 
                 if include_translation and seg.language != "eng":
