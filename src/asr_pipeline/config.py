@@ -189,9 +189,24 @@ class QwenCorrectorConfig(BaseModel):
     preserve_register: bool = True
 
 
+class QwenTranslatorConfig(BaseModel):
+    """Local Qwen3.5-dense translator (corrected Bengali -> English).
+
+    Served via local Ollama (private). Faithful translation only —
+    no summarizing, no added content; English/brand/number spans kept.
+    Replaces the (broken) TranslateGemma stage when selected.
+    """
+
+    model: str = "qwen2.5:7b"            # local Ollama Qwen3.5-dense tag
+    base_url: str = "http://localhost:11434"
+    temperature: float = 0.0
+    max_tokens: int = 1024
+
+
 class PostprocessingConfig(BaseModel):
-    translation_backend: Literal["translategemma", "ct2_nllb"] = "translategemma"
+    translation_backend: Literal["translategemma", "ct2_nllb", "qwen"] = "translategemma"
     translategemma: TranslateGemmaConfig = Field(default_factory=TranslateGemmaConfig)
+    qwen_translator: QwenTranslatorConfig = Field(default_factory=QwenTranslatorConfig)
     # Source-text corrector (runs before translation). "none" = current
     # behavior (no source correction). "qwen" = local Qwen3.5 corrector.
     correction_backend: Literal["none", "qwen"] = "none"

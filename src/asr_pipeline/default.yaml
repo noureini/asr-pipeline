@@ -316,7 +316,14 @@ alignment:
 # Post-processing
 # ---------------------------------------------------------------------------
 postprocessing:
-  translation_backend: "translategemma"  # "translategemma" (default) or "ct2_nllb" (legacy)
+  # "translategemma" (default, currently broken upstream) | "ct2_nllb"
+  # (legacy NLLB+Ollama) | "qwen" (local Qwen3.5-dense, private)
+  translation_backend: "translategemma"
+  qwen_translator:
+    model: "qwen2.5:7b"               # local Ollama Qwen3.5-dense tag
+    base_url: "http://localhost:11434"
+    temperature: 0.0
+    max_tokens: 1024
 
   # Source-text corrector — runs BEFORE translation. Fixes ASR errors +
   # restores code-switched English in the Bengali transcript.

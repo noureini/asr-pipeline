@@ -251,6 +251,78 @@ class QwenCorrector:
         return out
 
 
+class QwenTranslator:
+    """Local Qwen3.5-dense translator: (corrected) Bengali -> English.
+
+    Faithful translation only. Composes OllamaProcessor (local/private).
+    Per-segment fallback to '' on failure (never fabricates).
+    """
+
+    _PROMPT = (
+        "Translate the following Bengali text to natural English.\n"
+        "Rules:\n"
+        "1. Translate faithfully — do NOT summarize, omit, or add "
+        "information.\n"
+        "2. Keep English words, brand names, numbers, and proper nouns "
+        "as they are.\n"
+        "3. Output ONLY the English translation on one line, nothing "
+        "else (no notes, no quotes).\n\n"
+        "Bengali: {text}\n"
+        "English:"
+    )
+
+    def __init__(
+        self,
+        model: str = "qwen2.5:7b",
+        base_url: str = "http://localhost:11434",
+        temperature: float = 0.0,
+        max_tokens: int = 1024,
+    ) -> None:
+        self._llm = OllamaProcessor(model=model, base_url=base_url)
+        self._temperature = temperature
+        self._max_tokens = max_tokens
+        self._model_name = model
+
+    def load(self) -> bool:
+        ok = self._llm.load()
+        if ok:
+            logger.info(f"  ✓ QwenTranslator ready (model {self._model_name})")
+        else:
+            logger.warning(
+                "  QwenTranslator: Ollama/model unavailable — translation "
+                "will be empty for affected segments."
+            )
+        return ok
+
+    def unload(self) -> None:
+        self._llm.unload()
+
+    @property
+    def is_loaded(self) -> bool:
+        return self._llm.is_loaded
+
+    def translate_batch(self, texts: list[str]) -> list[str]:
+        if not self._llm.is_loaded:
+            return [""] * len(texts)
+        out: list[str] = []
+        for t in texts:
+            src = (t or "").strip()
+            if not src:
+                out.append("")
+                continue
+            try:
+                resp = self._llm.generate(
+                    self._PROMPT.format(text=src),
+                    temperature=self._temperature,
+                    max_tokens=self._max_tokens,
+                ).strip()
+            except Exception as e:
+                logger.warning(f"  QwenTranslator failed on a segment: {e}")
+                resp = ""
+            out.append(resp)
+        return out
+
+
 # =============================================================================
 # CTranslate2 NLLB Translator (Stage 1)
 # =============================================================================
@@ -777,6 +849,17 @@ class PostProcessor:
             base_url=config.correction.base_url,
         )
 
+        # Qwen translator (local; selected via translation_backend="qwen")
+        self._qwen_translator: Optional[QwenTranslator] = None
+        if config.translation_backend == "qwen":
+            qt = config.qwen_translator
+            self._qwen_translator = QwenTranslator(
+                model=qt.model,
+                base_url=qt.base_url,
+                temperature=qt.temperature,
+                max_tokens=qt.max_tokens,
+            )
+
         # Source-text corrector (runs before translation). Default off.
         self._qwen_corrector: Optional[QwenCorrector] = None
         if config.correction_backend == "qwen":
@@ -802,6 +885,9 @@ class PostProcessor:
             # Also load CT2 as fallback for unsupported languages
             if self._config.translation.enabled and self._config.translation.model_path:
                 self._translator.load()
+        elif backend == "qwen":
+            if self._qwen_translator is not None:
+                self._qwen_translator.load()
         else:
             # Legacy CT2 NLLB + Ollama path
             if self._config.translation.enabled:
@@ -816,6 +902,8 @@ class PostProcessor:
         self._llm.unload()
         if self._qwen_corrector is not None:
             self._qwen_corrector.unload()
+        if self._qwen_translator is not None:
+            self._qwen_translator.unload()
 
     def process(
         self,
@@ -865,6 +953,16 @@ class PostProcessor:
             # Single-pass: TranslateGemma handles translation + refinement
             translations = self._pass_translategemma(tx_segments, lang_configs)
             # For TranslateGemma, translation IS the refined output
+            refined_translations = translations
+        elif backend == "qwen":
+            # Local Qwen3.5-dense: faithful translation of corrected text
+            if (self._qwen_translator is not None
+                    and self._qwen_translator.is_loaded):
+                translations = self._qwen_translator.translate_batch(
+                    [s.raw_text for s in tx_segments]
+                )
+            else:
+                translations = [s.raw_text for s in tx_segments]
             refined_translations = translations
         else:
             # Legacy: CT2 translate → Ollama refine
