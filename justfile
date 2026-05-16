@@ -174,6 +174,11 @@ check-qwen-asr *flags:
 eval-omni-fleurs10 *flags:
     uv run python scripts/eval_omni_fleurs10.py {{flags}}
 
+# THE production gate: real survey interview vs human ground truth.
+# stem = interview filename without extension. LONG run (~hour audio).
+eval-real-survey stem *flags:
+    uv run python scripts/eval_real_survey.py --stem "{{stem}}" {{flags}}
+
 # ─── Maintenance ──────────────────────────────────────────────────────────
 
 # Show CUDA / GPU status
