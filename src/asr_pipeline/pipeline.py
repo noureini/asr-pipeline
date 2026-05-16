@@ -26,6 +26,7 @@ from asr_pipeline.alignment import align_segments, merge_consecutive_segments
 from asr_pipeline.config import AppConfig
 from asr_pipeline.diarization import SpeakerDiarizer, create_diarizer
 from asr_pipeline.engines.omnilingual_engine import OmnilingualEngine
+from asr_pipeline.engines.qwen_engine import QwenEngine
 from asr_pipeline.engines.whisper_engine import WhisperEngine
 from asr_pipeline.forced_aligner import ForcedAligner
 from asr_pipeline.formatter import write_transcript
@@ -76,6 +77,7 @@ class ASRPipeline:
         self._preprocessor: Optional[AudioPreprocessor] = None
         self._whisper: Optional[WhisperEngine] = None
         self._omnilingual: Optional[OmnilingualEngine] = None
+        self._qwen: Optional[QwenEngine] = None
         self._diarizer: Optional[SpeakerDiarizer] = None
         self._aligner: Optional[ForcedAligner] = None
         self._postprocessor: Optional[PostProcessor] = None
@@ -314,37 +316,40 @@ class ASRPipeline:
                               diarization backend (pyannote ignores these).
         """
         console.print()
-        console.rule(
-            "[stage]Stages 3 & 4: Transcription + Diarization (parallel)[/stage]",
-            style="cyan",
-        )
-        logger.info(
-            f"  Transcription ({engine_name}) and diarization "
-            f"running concurrently"
-        )
 
         parallel_start = time.perf_counter()
 
-        # We use threads (not processes) because the heavy lifting
-        # happens in C/CUDA extensions that release the GIL.
-        with ThreadPoolExecutor(max_workers=2) as executor:
-            transcription_future = executor.submit(
-                self._run_transcription,
-                chunks, language, engine_name, omni_lang,
-                wav_path,
+        if True:  # phoneme_first engine removed \u2014 standard path only
+            # \u2500\u2500 Standard: transcription + diarization in parallel \u2500\u2500
+            console.rule(
+                "[stage]Stages 3 & 4: Transcription + Diarization (parallel)[/stage]",
+                style="cyan",
             )
-            diarization_future = executor.submit(
-                self._run_diarization, wav_path, speech_timestamps,
+            logger.info(
+                f"  Transcription ({engine_name}) and diarization "
+                f"running concurrently"
             )
 
-            # Wait for both and propagate any exceptions
-            asr_segments = transcription_future.result()
-            diarization_result = diarization_future.result()
+            # We use threads (not processes) because the heavy lifting
+            # happens in C/CUDA extensions that release the GIL.
+            with ThreadPoolExecutor(max_workers=2) as executor:
+                transcription_future = executor.submit(
+                    self._run_transcription,
+                    chunks, language, engine_name, omni_lang,
+                    wav_path,
+                )
+                diarization_future = executor.submit(
+                    self._run_diarization, wav_path, speech_timestamps,
+                )
+
+                # Wait for both and propagate any exceptions
+                asr_segments = transcription_future.result()
+                diarization_result = diarization_future.result()
 
         parallel_elapsed = time.perf_counter() - parallel_start
         logger.info(
             f"[success]\u2713 Stages 3 & 4 completed[/success] "
-            f"in {parallel_elapsed:.1f}s (parallel)"
+            f"in {parallel_elapsed:.1f}s"
         )
 
         return asr_segments, diarization_result
@@ -405,6 +410,31 @@ class ASRPipeline:
                         segments = self._whisper.transcribe_chunk(chunk, language)
                         all_segments.extend(segments)
                         progress.advance(task)
+
+        elif engine_name == "qwen":
+            # ── Qwen3-ASR engine (default for non-high-resource) ──
+            # VAD chunking supplies segment boundaries; this engine
+            # only produces text per chunk.
+            if self._qwen is None or not self._qwen.is_loaded:
+                self._qwen = QwenEngine(
+                    self._config.qwen,
+                    device=self._config.pipeline.device,
+                )
+                self._qwen.load()
+
+            logger.info(
+                f"  Transcribing {len(chunks)} chunks with "
+                f"{self._qwen.name}"
+            )
+            progress = create_progress("Transcription")
+            with progress:
+                task = progress.add_task(
+                    "Qwen3-ASR", total=len(chunks),
+                )
+                for chunk in chunks:
+                    segments = self._qwen.transcribe_chunk(chunk, language)
+                    all_segments.extend(segments)
+                    progress.advance(task)
 
         else:  # omnilingual
             if self._omnilingual is None:

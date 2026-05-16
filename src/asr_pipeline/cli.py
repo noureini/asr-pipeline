@@ -576,7 +576,12 @@ def list_languages() -> None:
 
     for code, lang in sorted(cfg.languages.items()):
         tier_style = "green" if lang.tier.value == "high" else "yellow"
-        engine = "Whisper Large-v3" if lang.tier.value == "high" else "Omnilingual CTC 300M"
+        engine_name = cfg.engine_for_language(code)
+        engine = {
+            "whisper": "Whisper Large-v3",
+            "qwen": "Qwen3-ASR 1.7B",
+            "omnilingual": "Omnilingual CTC 300M",
+        }.get(engine_name, engine_name)
         table.add_row(
             code,
             lang.name,

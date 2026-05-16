@@ -89,6 +89,22 @@ class OmnilingualConfig(BaseModel):
     max_audio_length_s: int = 40
 
 
+class QwenConfig(BaseModel):
+    """Qwen3-ASR engine — default ASR for non-high-resource languages.
+
+    Bengali is not in Qwen3-ASR's official language list but the model
+    produces usable Bengali (validated ~8.5% CER on FLEURS). `language`
+    is the optional Qwen language hint ("Bengali", "English", ...);
+    None = auto-detect (the validated mode).
+    """
+
+    model: str = "Qwen/Qwen3-ASR-1.7B"
+    language: Optional[str] = None       # None = auto-detect
+    dtype: str = "bfloat16"              # bfloat16 | float16 | float32
+    device_map: str = "cuda:0"           # "cpu" for CPU-only boxes
+    max_audio_length_s: int = 30
+
+
 class NemoMsddConfig(BaseModel):
     """NeMo MSDD-specific diarization settings."""
 
@@ -185,6 +201,7 @@ class AppConfig(BaseModel):
     languages: dict[str, LanguageConfig] = Field(default_factory=dict)
     whisper: WhisperConfig = Field(default_factory=WhisperConfig)
     omnilingual: OmnilingualConfig = Field(default_factory=OmnilingualConfig)
+    qwen: QwenConfig = Field(default_factory=QwenConfig)
     diarization: DiarizationConfig = Field(default_factory=DiarizationConfig)
     alignment: AlignmentConfig = Field(default_factory=AlignmentConfig)
     postprocessing: PostprocessingConfig = Field(default_factory=PostprocessingConfig)
@@ -205,9 +222,17 @@ class AppConfig(BaseModel):
         )
 
     def engine_for_language(self, code: str) -> str:
-        """Return the ASR engine name for a given language code."""
+        """Return the ASR engine name for a given language code.
+
+        Priority:
+          1. High-resource → Whisper
+          2. Otherwise → Qwen3-ASR (default; Omnilingual remains
+             available via explicit config/override)
+        """
         lang = self.get_language(code)
-        return "whisper" if lang.tier == LanguageTier.HIGH else "omnilingual"
+        if lang.tier == LanguageTier.HIGH:
+            return "whisper"
+        return "qwen"
 
 
 # =============================================================================

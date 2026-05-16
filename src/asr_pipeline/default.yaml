@@ -273,6 +273,20 @@ omnilingual:
   max_audio_length_s: 40            # Omnilingual limit per chunk
 
 # ---------------------------------------------------------------------------
+# Qwen3-ASR engine — DEFAULT for non-high-resource languages
+# ---------------------------------------------------------------------------
+# Replaces Omnilingual as the production default. Bengali is not in
+# Qwen3-ASR's official language list but the model produces usable
+# Bengali (validated ~8.5% CER on FLEURS). Omnilingual config above is
+# retained and still usable via an explicit config override.
+qwen:
+  model: "Qwen/Qwen3-ASR-1.7B"
+  language: null                     # null = auto-detect (validated mode)
+  dtype: "bfloat16"                  # bfloat16 | float16 | float32
+  device_map: "cuda:0"               # "cpu" for CPU-only boxes
+  max_audio_length_s: 30             # per-chunk limit
+
+# ---------------------------------------------------------------------------
 # Speaker diarization
 # ---------------------------------------------------------------------------
 diarization:
