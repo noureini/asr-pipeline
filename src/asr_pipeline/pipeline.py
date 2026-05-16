@@ -582,6 +582,8 @@ class ASRPipeline:
         engines_used = []
         if engine_name == "whisper":
             engines_used.append(f"Whisper {self._config.whisper.model_size}")
+        elif engine_name == "qwen":
+            engines_used.append(f"Qwen3-ASR ({self._config.qwen.model})")
         else:
             engines_used.append(f"Omnilingual {self._config.omnilingual.model_card}")
 

@@ -281,7 +281,9 @@ omnilingual:
 # retained and still usable via an explicit config override.
 qwen:
   model: "Qwen/Qwen3-ASR-1.7B"
-  language: null                     # null = auto-detect (validated mode)
+  # null = auto-detect, but 1.7B auto-detects Bengali as Hindi
+  # (Devanagari). Force the hint to test if it can do Bengali at all.
+  language: "Bengali"
   dtype: "bfloat16"                  # bfloat16 | float16 | float32
   device_map: "cuda:0"               # "cpu" for CPU-only boxes
   max_audio_length_s: 30             # per-chunk limit
