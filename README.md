@@ -2,7 +2,7 @@
 
 Production-ready multilingual ASR pipeline with speaker diarization, LLM post-processing, and English translation. Built for qualitative research in low-resource language contexts.
 
-Supports **1,600+ languages** through a two-tier engine architecture that routes high-resource languages to Whisper Large-v3 and everything else to Meta's Omnilingual CTC 300M.
+Supports **1,600+ languages** through a two-tier engine architecture that routes high-resource languages to Whisper Large-v3 and everything else to Meta's Omnilingual.
 
 ## Table of Contents
 
