@@ -66,6 +66,21 @@ models/
 CHILDCARE_MEASUREMENT*/
 
 # ==============================================================================
+# Data / audio — NEVER commit (confidential survey data, privacy)
+# NOTE: already-tracked files are NOT untracked by this — run:
+#   git rm --cached <file>
+# To intentionally ship a tiny sample: git add -f <file>
+# ==============================================================================
+test_data/
+for testing (Noureini)/
+*.m4a
+*.mp3
+*.wav
+*.flac
+*.ogg
+*.aac
+
+# ==============================================================================
 # IDE & Editors
 # ==============================================================================
 .vscode/
