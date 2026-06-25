@@ -23,10 +23,12 @@ from pathlib import Path
 from typing import Optional
 
 from asr_pipeline.alignment import align_segments, merge_consecutive_segments
-from asr_pipeline.config import AppConfig
+from asr_pipeline.config import VALID_ASR_ENGINES, AppConfig
 from asr_pipeline.diarization import SpeakerDiarizer, create_diarizer
 from asr_pipeline.engines.omnilingual_engine import OmnilingualEngine
 from asr_pipeline.engines.qwen_engine import QwenEngine
+from asr_pipeline.engines.titu_engine import TituEngine
+from asr_pipeline.engines.indic_conformer_engine import IndicConformerEngine
 from asr_pipeline.engines.whisper_engine import WhisperEngine
 from asr_pipeline.forced_aligner import ForcedAligner
 from asr_pipeline.formatter import write_transcript
@@ -47,14 +49,43 @@ from asr_pipeline.models import (
     AudioQualityMetrics,
     LanguageTier,
     NonSpeechSegment,
+    ProcessedSegment,
     TranscriptMetadata,
     TranscriptResult,
     TranscriptionStyle,
 )
 from asr_pipeline.postprocessor import PostProcessor
+from asr_pipeline.fusion import FusionTranslator
 from asr_pipeline.preprocessor import AudioPreprocessor
 
 logger = logging.getLogger("asr_pipeline")
+
+
+def _set_global_seeds(seed: int) -> None:
+    """Seed every RNG the pipeline touches so a run is reproducible from ONE
+    knob (pipeline.seed): Python, NumPy, torch (CPU+CUDA), and CTranslate2 (the
+    CT2 Whisper sampler). Deliberately does NOT enable
+    torch.use_deterministic_algorithms — it errors on some NeMo/pyannote ops and
+    is unnecessary (the sampling stages, now seeded, are the real variation)."""
+    import random
+    random.seed(seed)
+    try:
+        import numpy as _np
+        _np.random.seed(seed)
+    except Exception:
+        pass
+    try:
+        import torch
+        torch.manual_seed(seed)
+        if torch.cuda.is_available():
+            torch.cuda.manual_seed_all(seed)
+    except Exception:
+        pass
+    try:
+        import ctranslate2
+        ctranslate2.set_random_seed(seed)
+    except Exception:
+        pass
 
 
 class ASRPipeline:
@@ -78,6 +109,8 @@ class ASRPipeline:
         self._whisper: Optional[WhisperEngine] = None
         self._omnilingual: Optional[OmnilingualEngine] = None
         self._qwen: Optional[QwenEngine] = None
+        self._titu: Optional[TituEngine] = None
+        self._indic_conformer: Optional[IndicConformerEngine] = None
         self._diarizer: Optional[SpeakerDiarizer] = None
         self._aligner: Optional[ForcedAligner] = None
         self._postprocessor: Optional[PostProcessor] = None
@@ -119,6 +152,9 @@ class ASRPipeline:
         output_dir = Path(output_dir or self._config.pipeline.output_dir)
         pipeline_start = time.perf_counter()
 
+        # Reproducibility: seed every RNG from the single pipeline.seed knob.
+        _set_global_seeds(self._config.pipeline.seed)
+
         # Override speaker counts if provided
         if min_speakers is not None:
             self._config.diarization.min_speakers = min_speakers
@@ -157,15 +193,67 @@ class ASRPipeline:
                 )
 
                 # ── Stage 3b: Forced Alignment ─────────────────
-                with stage_log("3b", "Forced Alignment", "Refining word timestamps via wav2vec2"):
+                with stage_log("3b", "Word Timestamps", "titu native CTC word timestamps (forced alignment skipped)"):
                     asr_segments = self._run_forced_alignment(
                         asr_segments, wav_path, language
                     )
+                    # De-dup the chunk overlap: each word in an overlap
+                    # region is owned by exactly one chunk (midpoint split),
+                    # so boundary words are kept once, transcribed with
+                    # context. Needs the word timestamps from 3b.
+                    asr_segments = self._dedup_overlap_words(asr_segments)
 
                 # ── Stage 5: Alignment ───────────────────────────
-                with stage_log("5", "Alignment", "Merging ASR segments with speaker labels"):
+                # Word-level speaker attribution → speaker-pure segments
+                # (still labelled by diarization cluster SPEAKER_xx). The
+                # cluster→role decision (ENUMERATOR / RESPONDENT) is made
+                # once inside the fusion stage by an LLM classifier, where
+                # Gemma is already loaded — so the raw transcript shows the
+                # honest pre-LLM clusters.
+                with stage_log("5", "Alignment", "Word-level speaker attribution"):
                     aligned = align_segments(asr_segments, diarization_result)
                     aligned = merge_consecutive_segments(aligned)
+
+                # ── Stage 5b: Raw transcript snapshot ──────────
+                # Save a transcript built ONLY from titu + diarization
+                # (no LLM correction, no translation). Lets the reviewer
+                # compare raw ASR vs. LLM-cleaned output side by side,
+                # and gives a usable deliverable even if stage 6 fails
+                # or is killed.
+                with stage_log("5b", "Raw Output",
+                               "Writing raw titu+diarization transcript"):
+                    raw_processed = [
+                        ProcessedSegment(
+                            segment_id=s.segment_id,
+                            start_s=s.start_s,
+                            end_s=s.end_s,
+                            speaker_id=s.speaker_id,
+                            language=s.language,
+                            raw_text=s.raw_text,
+                            corrected_text=s.raw_text,
+                            english_translation="",
+                            refined_translation="",
+                            confidence=s.confidence,
+                        )
+                        for s in aligned
+                    ]
+                    raw_result = self._build_result(
+                        audio_path, language, engine_name, raw_processed,
+                        diarization_result.num_speakers, project_name,
+                        non_speech_regions,
+                    )
+                    if write_output:
+                        raw_written = write_transcript(
+                            raw_result,
+                            output_dir,
+                            f"{audio_path.stem}.raw",
+                            output_format=self._config.output.format,
+                            timestamp_fmt=self._config.output.timestamp_format,
+                            include_raw=True,
+                            include_translation=False,
+                        )
+                        for p in raw_written:
+                            logger.info(f"  ✓ raw transcript: {p.name}")
 
                 # Free GPU memory before loading translation/LLM models
                 self._free_gpu_for_postprocessing()
@@ -173,7 +261,7 @@ class ASRPipeline:
                 # ── Stage 6a: Translation ───────────────────────
                 # ── Stage 6b: Joint Refinement ──────────────────
                 with stage_log("6", "Post-Processing", "Translation → Joint Refinement"):
-                    processed = self._run_postprocessing(aligned)
+                    processed = self._run_postprocessing(aligned, wav_path)
 
                 # ── Stage 7: Output ──────────────────────────────
                 with stage_log("7", "Output", "Formatting and writing transcript"):
@@ -193,6 +281,19 @@ class ASRPipeline:
                             include_raw=self._config.output.include_raw_text,
                             include_translation=self._config.output.include_translation,
                         )
+                        # Targeted human-QA worklist: only the segments
+                        # the fusion flagged (witness disagreement, a
+                        # number to verify, or unclear text). Lets a
+                        # reviewer check ~handful of spots, not all 200+.
+                        self._write_review_file(
+                            result.segments, output_dir, audio_path.stem)
+                        # Fusion audit trail (the <think> reasoning per
+                        # segment). On by default: free at generation time
+                        # and the evidence that the model is doing genuine
+                        # likelihood-vs-prior reconciliation — also where
+                        # the dropped/fallback segments are inspected.
+                        self._write_reasoning_file(
+                            result.segments, output_dir, audio_path.stem)
 
             finally:
                 self._cleanup()
@@ -282,12 +383,34 @@ class ASRPipeline:
         engine_name = self._config.engine_for_language(language)
         omni_lang = map_iso639_3_to_omnilingual(language, self._language_registry)
 
+        # Guard: routing must resolve to a buildable engine. force_engine is
+        # already validated at config load, but assert here too so the hardcoded
+        # tier paths (and any future routing change) can never silently pick an
+        # engine the pipeline can't construct — fail loudly, not mid-run.
+        if engine_name not in VALID_ASR_ENGINES:
+            raise ValueError(
+                f"Stage 2 routing resolved language '{language}' to unknown "
+                f"engine '{engine_name}'. Valid engines: "
+                f"{sorted(VALID_ASR_ENGINES)}. Check pipeline.force_engine and "
+                f"the tier mapping in your config."
+            )
+
+        # Why this engine? Make the routing reason explicit — never a silent
+        # surprise about which model transcribed the survey.
+        forced = self._config.pipeline.force_engine
+        if lang_config.tier == LanguageTier.HIGH:
+            reason = "tier=HIGH → whisper"
+        elif forced:
+            reason = f"force_engine={forced}"
+        else:
+            reason = "tier default → omnilingual"
+
         logger.info(
             f"  Language: [bold]{lang_config.name}[/bold] ({language})"
         )
         logger.info(
             f"  Tier: [bold]{lang_config.tier.value}[/bold] → "
-            f"Engine: [bold]{engine_name}[/bold]"
+            f"Engine: [bold]{engine_name}[/bold]  ([dim]{reason}[/dim])"
         )
         if engine_name == "omnilingual":
             logger.info(f"  Omnilingual code: {omni_lang}")
@@ -436,6 +559,66 @@ class ASRPipeline:
                     all_segments.extend(segments)
                     progress.advance(task)
 
+        elif engine_name == "titu":
+            # ── titu Bengali FastConformer-CTC engine ──
+            # NeMo model. Batched inference is significantly faster
+            # than per-chunk; we use transcribe_batch.
+            if self._titu is None or not self._titu.is_loaded:
+                self._titu = TituEngine(
+                    device=self._config.pipeline.device,
+                    batch_size=self._config.titu.batch_size,
+                    model_id=self._config.titu.model_id,
+                )
+                self._titu.load()
+
+            logger.info(
+                f"  Transcribing {len(chunks)} chunks with "
+                f"{self._titu.name}"
+            )
+            progress = create_progress("Transcription")
+            with progress:
+                task = progress.add_task(
+                    "titu (FastConformer-CTC)", total=len(chunks),
+                )
+                # Batched: NeMo's model.transcribe handles batching
+                # internally. Update progress proportionally.
+                batch_size = self._config.titu.batch_size
+                for i in range(0, len(chunks), batch_size):
+                    batch = chunks[i:i + batch_size]
+                    segs = self._titu.transcribe_batch(batch, language)
+                    all_segments.extend(segs)
+                    for _ in batch:
+                        progress.advance(task)
+
+        elif engine_name == "indic_conformer":
+            # ── AI4Bharat IndicConformer-600M (open, local) ──
+            # Loads via transformers trust_remote_code; per-utterance
+            # call interface, so we loop chunks. decoder configurable
+            # via pipeline.indic_conformer_decoder (ctc|rnnt).
+            decoder = getattr(
+                self._config.pipeline, "indic_conformer_decoder", "rnnt")
+            if self._indic_conformer is None or not self._indic_conformer.is_loaded:
+                self._indic_conformer = IndicConformerEngine(
+                    device=self._config.pipeline.device,
+                    decoder=decoder,
+                )
+                self._indic_conformer.load()
+
+            logger.info(
+                f"  Transcribing {len(chunks)} chunks with "
+                f"{self._indic_conformer.name}"
+            )
+            progress = create_progress("Transcription")
+            with progress:
+                task = progress.add_task(
+                    self._indic_conformer.name, total=len(chunks),
+                )
+                for chunk in chunks:
+                    segs = self._indic_conformer.transcribe_chunk(
+                        chunk, language)
+                    all_segments.extend(segs)
+                    progress.advance(task)
+
         else:  # omnilingual
             if self._omnilingual is None:
                 self._omnilingual = OmnilingualEngine(
@@ -487,6 +670,49 @@ class ASRPipeline:
         self._diarizer.load()
         return self._diarizer.diarize(wav_path, vad_segments=vad_segments)
 
+    def _dedup_overlap_words(
+        self, segments: list[ASRSegment]
+    ) -> list[ASRSegment]:
+        """Remove the duplicate text in overlapping chunks by word-ownership.
+
+        Chunks overlap by ~overlap_s (set in the preprocessor) so every
+        boundary word is transcribed WITH context in at least one chunk.
+        Two consecutive segments that overlap in time share that region's
+        words twice; assign each word to exactly one segment by splitting
+        the overlap at its MIDPOINT (word center < midpoint → left segment,
+        else → right), then rebuild each segment's text from its kept words.
+
+        No-op when segments don't overlap or lack word timestamps (e.g.
+        alignment was skipped) — safe to call unconditionally.
+        """
+        if len(segments) < 2:
+            return segments
+        n_trimmed = 0
+        for i in range(len(segments) - 1):
+            a, b = segments[i], segments[i + 1]
+            if not a.words or not b.words:
+                continue
+            if b.start_s >= a.end_s:          # no temporal overlap
+                continue
+            mid = (b.start_s + a.end_s) / 2.0
+            a_keep = [w for w in a.words if (w.start_s + w.end_s) / 2.0 < mid]
+            b_keep = [w for w in b.words if (w.start_s + w.end_s) / 2.0 >= mid]
+            # only commit if both sides keep something (never blank a segment)
+            if a_keep and len(a_keep) != len(a.words):
+                a.words = a_keep
+                a.text = " ".join(w.word for w in a_keep).strip()
+                a.end_s = a_keep[-1].end_s
+                n_trimmed += 1
+            if b_keep and len(b_keep) != len(b.words):
+                b.words = b_keep
+                b.text = " ".join(w.word for w in b_keep).strip()
+                b.start_s = b_keep[0].start_s
+                n_trimmed += 1
+        if n_trimmed:
+            logger.info("  ✓ Overlap de-dup: trimmed %d segment edges",
+                        n_trimmed)
+        return segments
+
     def _run_forced_alignment(
         self,
         segments: list[ASRSegment],
@@ -504,6 +730,16 @@ class ASRPipeline:
             logger.info("  Forced alignment disabled in config, skipping")
             return segments
 
+        # titu (CTC) now emits native word timestamps; when present they are
+        # consistent with the text, so the MMS_FA pass is redundant AND would
+        # CORRUPT them (MMS_FA is a no-op on Bengali — it strips non-Latin —
+        # and would only partially align code-switched Latin words). Skip it.
+        if any(s.words for s in segments):
+            n = sum(1 for s in segments if s.words)
+            logger.info("  Word timestamps already present (titu CTC) on "
+                        "%d/%d segments — skipping MMS_FA", n, len(segments))
+            return segments
+
         self._aligner = ForcedAligner(
             self._config.alignment,
             device=self._config.pipeline.device,
@@ -515,8 +751,47 @@ class ASRPipeline:
 
         return self._aligner.align_segments(segments, wav_path, language)
 
-    def _run_postprocessing(self, aligned: list) -> list:
+    def _run_postprocessing(self, aligned: list, wav_path=None) -> list:
         """Stage 6: Run post-processing (translation + optional refinement)."""
+        # ── Validated two-witness fusion + NMT backend ──────────────
+        if self._config.postprocessing.translation_backend == "fusion":
+            fc = self._config.postprocessing.fusion
+            logger.info(
+                "  Fusion stage: titu ‖ Whisper → Gemma-3 fusion + "
+                "translation (one model, fully local, open)")
+            logger.info(f"    2nd witness        : {fc.whisper_model}")
+            logger.info(f"    fusion+translation : {fc.gguf_file}")
+            translator = FusionTranslator(
+                device=self._config.pipeline.device,
+                whisper_model=fc.whisper_model,
+                whisper_ct2_path=fc.whisper_ct2_path,
+                gguf_repo=fc.gguf_repo,
+                gguf_file=fc.gguf_file,
+                gguf_n_gpu_layers=fc.gguf_n_gpu_layers,
+                prompt_lookup_tokens=fc.prompt_lookup_tokens,
+                whisper_batch_size=fc.whisper_batch_size,
+                whisper_nbest=fc.whisper_nbest,
+                temperature=fc.temperature,
+                top_p=fc.top_p,
+                top_k=fc.top_k,
+                min_p=fc.min_p,
+                repeat_penalty=fc.repeat_penalty,
+                seed=fc.seed,
+                n_ctx=fc.n_ctx,
+                flash_attn=fc.flash_attn,
+                kv_quant=fc.kv_quant,
+                fusion_max_tokens=fc.fusion_max_tokens,
+                fusion_think=fc.fusion_think,
+                ger_guard=fc.ger_guard,
+                ger_snap=fc.ger_snap,
+                ger_snap_tau=fc.ger_snap_tau,
+                prompts_file=fc.prompts_file,
+                fusion_backend=fc.fusion_backend,
+                n_parallel=fc.n_parallel,
+                server_port=fc.server_port,
+            )
+            return translator.process(aligned, wav_path)
+
         self._postprocessor = PostProcessor(
             self._config.postprocessing,
             self._language_registry,
@@ -535,6 +810,22 @@ class ASRPipeline:
             active.append(
                 f"6: TranslateGemma Translation + Cleanup ({tg_model}{quant_label})"
             )
+        elif backend == "qwen":
+            # Local LLM (GGUF) for both correction and translation.
+            # In our config this is TigerLLM-9B for Bengali ASR cleanup
+            # + Bengali → English translation.
+            corr = self._config.postprocessing.qwen_corrector
+            trans = self._config.postprocessing.qwen_translator
+            if corr.enabled:
+                model_label = corr.gguf_file or corr.gguf_repo or "GGUF"
+                active.append(
+                    f"6a: Source Correction (local LLM: {model_label})"
+                )
+            if trans.enabled:
+                model_label = trans.gguf_file or trans.gguf_repo or "GGUF"
+                active.append(
+                    f"6b: Translation (local LLM: {model_label})"
+                )
         else:
             if self._config.postprocessing.translation.enabled:
                 if self._config.postprocessing.translation.model_path:
@@ -584,14 +875,37 @@ class ASRPipeline:
             engines_used.append(f"Whisper {self._config.whisper.model_size}")
         elif engine_name == "qwen":
             engines_used.append(f"Qwen3-ASR ({self._config.qwen.model})")
+        elif engine_name == "titu":
+            engines_used.append("titu (FastConformer-CTC Bengali)")
+        elif engine_name == "indic_conformer":
+            dec = getattr(
+                self._config.pipeline, "indic_conformer_decoder", "rnnt")
+            engines_used.append(
+                f"IndicConformer-600M ({dec.upper()}, AI4Bharat)")
         else:
             engines_used.append(f"Omnilingual {self._config.omnilingual.model_card}")
 
         # Post-processing stages
         pp_stages = []
         backend = self._config.postprocessing.translation_backend
-        if backend == "translategemma":
+        if backend == "fusion":
+            fc = self._config.postprocessing.fusion
+            pp_stages.append(
+                f"Two-witness fusion + translation "
+                f"(titu ‖ Whisper → {fc.gguf_file})")
+        elif backend == "translategemma":
             pp_stages.append("TranslateGemma Translation")
+        elif backend == "qwen":
+            corr = self._config.postprocessing.qwen_corrector
+            trans = self._config.postprocessing.qwen_translator
+            if corr.enabled:
+                pp_stages.append(
+                    f"Source Correction ({corr.gguf_file or corr.gguf_repo or 'local LLM'})"
+                )
+            if trans.enabled:
+                pp_stages.append(
+                    f"Translation ({trans.gguf_file or trans.gguf_repo or 'local LLM'})"
+                )
         else:
             if self._config.postprocessing.translation.enabled:
                 pp_stages.append("NLLB-200 Translation")
@@ -673,6 +987,87 @@ class ASRPipeline:
     # GPU memory management
     # ─────────────────────────────────────────────────────────────────
 
+    def _write_review_file(self, segments, output_dir, stem) -> None:
+        """Write a QA worklist of only the flagged segments."""
+        flagged = [s for s in segments
+                   if getattr(s, "needs_review", False)]
+        path = Path(output_dir) / f"{stem}.review.txt"
+
+        def hhmmss(sec: float) -> str:
+            sec = int(sec or 0)
+            return f"{sec // 3600:02d}:{(sec % 3600) // 60:02d}:{sec % 60:02d}"
+
+        lines = [
+            "HUMAN-QA WORKLIST — review only these segments",
+            f"{len(flagged)} of {len(segments)} segments flagged "
+            f"({100 * len(flagged) // max(1, len(segments))}%)",
+            "Reasons: number=verify the figure | witness-disagree=ASR "
+            "engines diverged | unclear=fusion couldn't recover | "
+            "empty-output=no translation | fusion-fallback=LLM gave no "
+            "Bengali, FLUENT raw substituted | fusion-truncated=hit the "
+            "token cap (the hard/long segments)",
+            "=" * 70,
+            "",
+        ]
+        for s in flagged:
+            lines.append(f"[{hhmmss(s.start_s)}] {s.speaker_id}  "
+                         f"⚠ {s.review_reason}")
+            if s.raw_text:
+                lines.append(f"  raw: {s.raw_text}")
+            lines.append(f"  bn : {s.corrected_text}")
+            lines.append(f"  en : {s.english_translation}")
+            lines.append("")
+        Path(path).write_text("\n".join(lines), encoding="utf-8")
+        logger.info("  ✓ review worklist: %s (%d flagged)",
+                    path.name, len(flagged))
+
+    def _write_reasoning_file(self, segments, output_dir, stem) -> None:
+        """Write the fusion <think> reasoning per segment — the audit
+        trail for the witness-reconciliation claim. Marks fallback
+        segments (LLM produced no Bengali → FLUENT raw substituted) so the
+        coverage hole is inspectable, not hidden in the transcript."""
+        path = Path(output_dir) / f"{stem}.reasoning.txt"
+
+        def hhmmss(sec: float) -> str:
+            sec = int(sec or 0)
+            return f"{sec // 3600:02d}:{(sec % 3600) // 60:02d}:{sec % 60:02d}"
+
+        fb = sum(1 for s in segments
+                 if getattr(s, "fusion_fallback", False))
+        lines = [
+            "FUSION REASONING TRACE — model's <think> per segment",
+            f"{len(segments)} segments | {fb} fusion-fallback "
+            "(LLM empty → FLUENT raw substituted)",
+            "=" * 70,
+            "",
+        ]
+        for s in segments:
+            tag = "  ⚠ FALLBACK" if getattr(s, "fusion_fallback", False) else ""
+            lines.append(f"[{hhmmss(s.start_s)}] {s.speaker_id}{tag}")
+            think = (getattr(s, "reasoning", "") or "").strip()
+            # raw witnesses (snap audit): a term in bn/en but in NEITHER of
+            # these came from the vocabulary anchor, not the audio.
+            lit = (getattr(s, "witness_literal", "") or "").strip()
+            flu = (getattr(s, "witness_fluent", "") or "").strip()
+            if lit or flu:
+                lines.append(f"  LITERAL (titu)   : {lit}")
+                lines.append(f"  FLUENT (whisper) : {flu}")
+            lines.append(f"  think: {think or '(model skipped <think>)'}")
+            lines.append(f"  bn   : {s.corrected_text}")
+            lines.append(f"  en   : {s.english_translation}")
+            md = getattr(s, "ger_min_dist", None)
+            if md is not None:
+                ag = getattr(s, "ger_witness_agree", None)
+                rr = (getattr(s, "review_reason", "") or "").strip()
+                lines.append(
+                    f"  ger  : min_dist={md:.3f}"
+                    + (f" agree={ag:.3f}" if ag is not None else "")
+                    + (f" [{rr}]" if rr else ""))
+            lines.append("")
+        Path(path).write_text("\n".join(lines), encoding="utf-8")
+        logger.info("  ✓ reasoning trace: %s (%d fallback)",
+                    path.name, fb)
+
     def _free_gpu_for_postprocessing(self) -> None:
         """
         Unload ASR/diarization/alignment models before post-processing.
@@ -686,6 +1081,12 @@ class ASRPipeline:
         if self._whisper is not None:
             self._whisper.unload()
             self._whisper = None
+        if self._titu is not None:
+            # titu (NeMo FastConformer) is the primary engine on this
+            # path and holds a large CUDA workspace. Not freeing it left
+            # the 8GB card full → the fusion Whisper OOM'd even one clip.
+            self._titu.unload()
+            self._titu = None
         if self._omnilingual is not None:
             # Offload to CPU instead of destroying — avoids fairseq2
             # thread-local gang context corruption on reload.

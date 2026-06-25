@@ -29,6 +29,60 @@ logger = logging.getLogger("asr_pipeline")
 
 
 # =============================================================================
+# Survey wiki auto-loader (used by QwenCorrector / QwenTranslator)
+# =============================================================================
+# If data/survey_wiki/ is present (built once by
+# scripts/build_survey_wiki.py from the MMI Protocol docx), inject
+# the domain vocabulary into the corrector's system context so the
+# LLM gravitates toward valid survey-domain terms when titu's
+# output is ambiguous. Zero-config: drops in automatically when the
+# wiki files exist.
+
+def _load_survey_wiki_for_prompt() -> str:
+    """Return a compact context string from the survey wiki, or ""
+    if the wiki isn't present."""
+    from pathlib import Path
+    repo = Path(__file__).resolve().parents[2]
+    wiki = repo / "data" / "survey_wiki"
+    if not wiki.exists():
+        return ""
+    pieces: list[str] = []
+    # Domain vocabulary — the main quality lever
+    vfile = wiki / "domain_vocabulary.md"
+    if vfile.exists():
+        terms: list[str] = []
+        for ln in vfile.read_text(encoding="utf-8").splitlines():
+            ln = ln.strip()
+            if not ln or ln.startswith("#"):
+                continue
+            if ln.startswith("Extracted from"):
+                continue
+            terms.append(ln)
+        if terms:
+            pieces.append(
+                "This is an MMI (Mental Model Interview) survey on "
+                "climate risk in coastal Bangladesh (Satkhira / "
+                "Sunamganj). Expected domain vocabulary:\n"
+                + " | ".join(terms)[:1500]
+            )
+    # Section structure (helps the LLM understand which part of the
+    # interview a chunk likely comes from)
+    sfile = wiki / "sections.json"
+    if sfile.exists():
+        import json
+        try:
+            sections = json.loads(sfile.read_text(encoding="utf-8"))
+            names = [s.get("title", "")
+                     for s in sections if s.get("title")]
+            if names:
+                pieces.append(
+                    "Interview sections: " + " → ".join(names))
+        except Exception:
+            pass
+    return "\n\n".join(pieces)
+
+
+# =============================================================================
 # Ollama LLM Processor (Stage 2 only — joint refinement)
 # =============================================================================
 
@@ -162,17 +216,27 @@ class QwenCorrector:
         "You are correcting a Bengali speech-to-text transcript. The "
         "recognizer makes phonetic errors and writes spoken English words "
         "in Bengali script.\n"
+        "{context}"
         "Rules:\n"
-        "1. Fix obvious recognition errors (wrong/garbled characters).\n"
-        "2. Restore code-switched English words to correct English "
-        "spelling (e.g. ভেকসিন -> vaccine, বিকাশ brand -> bKash).\n"
+        "1. Fix ONLY clear recognition errors — garbled/non-word "
+        "tokens and obvious phonetic slips.\n"
+        "2. ONLY when you are CONFIDENT a token is a code-switched "
+        "English word written phonetically in Bengali script, restore "
+        "it to correct English spelling (e.g. ভেকসিন -> vaccine, "
+        "বিকাশ brand -> bKash). If a token is garbled or you are not "
+        "sure which English word was meant, leave it unchanged.\n"
         "3. Keep genuine Bengali words and Bengali administrative terms "
         "in Bengali (e.g. ইউনিয়ন পরিষদ stays Bengali).\n"
-        "4. Do NOT add information. Do NOT translate. Do NOT change "
-        "meaning. Do NOT invent words. If a span is unintelligible, "
-        "leave it unchanged.\n"
+        "4. INTELLIGENT VERBATIM: do NOT add, translate, summarize, "
+        "rephrase, normalize dialect, smooth grammar, or invent. Keep "
+        "the speaker's words/disfluencies as spoken. If a span is "
+        "unintelligible, leave it unchanged.\n"
         "{register}\n"
+        "6. If the same word or short phrase repeats many times in a "
+        "row, that is a recognizer loop (an artifact, NOT speech): "
+        "keep ONE occurrence and replace the rest with [unclear].\n"
         "Output ONLY the corrected transcript on one line, nothing else.\n\n"
+        "{dyn}"
         "Transcript: {text}\n"
         "Corrected:"
     )
@@ -192,7 +256,32 @@ class QwenCorrector:
             self._REGISTER_PRESERVE if cfg.preserve_register
             else self._REGISTER_STANDARD
         )
+        ctx_pieces = []
+        # Explicit user-provided context
+        user_ctx = (getattr(cfg, "context", "") or "").strip()
+        if user_ctx:
+            ctx_pieces.append(user_ctx)
+        # Auto-load the survey wiki (built once via
+        # scripts/build_survey_wiki.py) if present. Gives the
+        # corrector the survey domain anchor — the LLM gravitates
+        # toward valid domain terms when titu's output is ambiguous
+        # (e.g. পৌরসা → পৌরসভা, আইলা preserved as the cyclone name).
+        survey_ctx = _load_survey_wiki_for_prompt()
+        if survey_ctx:
+            ctx_pieces.append(survey_ctx)
+            logger.info(
+                "  QwenCorrector: loaded survey wiki vocabulary "
+                f"({len(survey_ctx)} chars)")
+        full_ctx = "\n\n".join(ctx_pieces)
+        self._context = f"Context: {full_ctx}\n" if full_ctx else ""
+        self._dyn = ""  # per-call rolling/entity context (caller-set)
         self._backend = cfg.backend
+
+    def set_context(self, dyn: str) -> None:
+        """Set per-call dynamic context (rolling prior + entity memory).
+        Empty string disables it. Caller updates this before each
+        correct() call; default '' keeps production behaviour."""
+        self._dyn = dyn or ""
 
     def load(self) -> bool:
         ok = self._llm.load()
@@ -221,26 +310,35 @@ class QwenCorrector:
         if not self._llm.is_loaded:
             return list(texts)
         out: list[str] = []
-        for t in texts:
-            src = (t or "").strip()
-            if not src:
-                out.append(t)
-                continue
-            prompt = self._PROMPT.format(register=self._register, text=src)
-            try:
-                resp = self._llm.generate(
-                    prompt,
-                    temperature=self._temperature,
-                    max_tokens=self._max_tokens,
-                ).strip()
-            except Exception as e:
-                logger.warning(f"  QwenCorrector failed on a segment: {e}")
-                resp = ""
-            # Guard against empty / refusal / runaway output: fall back.
-            if not resp or len(resp) > max(40, len(src) * 4):
-                out.append(t)
-            else:
-                out.append(resp)
+        progress = create_progress("Source correction (LLM)")
+        with progress:
+            task = progress.add_task(
+                "QwenCorrector (per-segment)", total=len(texts))
+            for t in texts:
+                src = (t or "").strip()
+                if not src:
+                    out.append(t)
+                    progress.advance(task)
+                    continue
+                prompt = self._PROMPT.format(
+                    register=self._register, text=src,
+                    context=self._context, dyn=self._dyn)
+                try:
+                    resp = self._llm.generate(
+                        prompt,
+                        temperature=self._temperature,
+                        max_tokens=self._max_tokens,
+                    ).strip()
+                except Exception as e:
+                    logger.warning(
+                        f"  QwenCorrector failed on a segment: {e}")
+                    resp = ""
+                # Guard against empty / refusal / runaway output.
+                if not resp or len(resp) > max(40, len(src) * 4):
+                    out.append(t)
+                else:
+                    out.append(resp)
+                progress.advance(task)
         return out
 
 
@@ -259,6 +357,9 @@ class GGUFProcessor:
         n_gpu_layers: int = -1,
         n_ctx: int = 4096,
         n_threads: int = 8,
+        prompt_lookup_tokens: int = 0,
+        flash_attn: bool = False,
+        kv_quant: bool = False,
     ) -> None:
         self._path = gguf_path
         self._repo = gguf_repo
@@ -266,6 +367,18 @@ class GGUFProcessor:
         self._n_gpu_layers = n_gpu_layers
         self._n_ctx = n_ctx
         self._n_threads = n_threads
+        # Flash attention shrinks the KV cache + compute buffers and
+        # speeds decode — critical on 8GB where the 7GB model leaves
+        # almost no room for KV (avoids paging to host RAM).
+        self._flash_attn = flash_attn
+        # Store the KV cache as q8_0 (half the memory) — frees VRAM so
+        # the whole model+KV fits on-card instead of spilling.
+        self._kv_quant = kv_quant
+        # >0 enables prompt-lookup speculative decoding: the model
+        # proposes this many tokens by copying n-grams from the prompt
+        # and verifies them — lossless speedup on tasks where the output
+        # echoes the input (translation, fusion). 0 = disabled.
+        self._prompt_lookup_tokens = prompt_lookup_tokens
         self._llm: Optional[object] = None
         self._available = False
 
@@ -284,15 +397,63 @@ class GGUFProcessor:
                 n_ctx=self._n_ctx,
                 n_threads=self._n_threads,
                 n_gpu_layers=self._n_gpu_layers,
+                flash_attn=self._flash_attn,
                 verbose=False,
             )
+            if self._kv_quant:
+                try:
+                    from llama_cpp import GGML_TYPE_Q8_0
+                    common["type_k"] = GGML_TYPE_Q8_0
+                    common["type_v"] = GGML_TYPE_Q8_0
+                except Exception:
+                    pass
+            # Prompt-lookup speculative decoding (lossless): proposes
+            # tokens by matching n-grams from the prompt and verifies
+            # them with the full model. Big win when the output echoes
+            # the input (translation, ASR fusion). Output is identical
+            # to greedy — only faster.
+            if self._prompt_lookup_tokens > 0:
+                try:
+                    # Lives in the llama_cpp.llama_speculative submodule,
+                    # not the top-level package.
+                    from llama_cpp.llama_speculative import (
+                        LlamaPromptLookupDecoding)
+                    common["draft_model"] = LlamaPromptLookupDecoding(
+                        num_pred_tokens=self._prompt_lookup_tokens)
+                    logger.info(
+                        "  prompt-lookup speculative decoding ON "
+                        f"(num_pred_tokens={self._prompt_lookup_tokens})")
+                except Exception as e:
+                    logger.warning("  prompt-lookup unavailable (%s) — "
+                                   "running without it", e)
+            logger.info(
+                "  GGUF load opts: n_ctx=%s flash_attn=%s kv_quant=%s "
+                "(type_k set=%s)", common.get("n_ctx"),
+                common.get("flash_attn"), self._kv_quant,
+                "type_k" in common)
             if self._path:
                 self._llm = Llama(model_path=str(self._path), **common)
             elif self._repo and self._file:
-                # One-time HF download into the local cache, then local.
-                self._llm = Llama.from_pretrained(
-                    repo_id=self._repo, filename=self._file, **common
-                )
+                # Prefer the already-cached file via a pure local-cache
+                # lookup (no HF API call) so this works fully offline
+                # (HF_HUB_OFFLINE) and without a network. Only fall back
+                # to from_pretrained (which hits the API + downloads) if
+                # the file isn't cached yet.
+                model_path = None
+                try:
+                    from huggingface_hub import hf_hub_download
+                    model_path = hf_hub_download(
+                        repo_id=self._repo, filename=self._file,
+                        local_files_only=True)
+                except Exception:
+                    model_path = None
+                if model_path:
+                    self._llm = Llama(model_path=model_path, **common)
+                else:
+                    # Not cached — one-time download, then local.
+                    self._llm = Llama.from_pretrained(
+                        repo_id=self._repo, filename=self._file, **common
+                    )
             else:
                 logger.warning(
                     "  GGUF backend: set gguf_path OR "
@@ -300,10 +461,49 @@ class GGUFProcessor:
                 )
                 return False
             self._available = True
-            logger.info("  ✓ GGUF model loaded (llama.cpp, in-process)")
+            # Sanity check: is llama-cpp-python actually GPU-offloaded?
+            # If the wheel was built without CUDA, n_gpu_layers is
+            # silently ignored → CPU inference → 5–10× slower.
+            self._family = self._detect_family()
+            self._chat_capable = self._has_chat_template()
+            try:
+                meta = getattr(self._llm, "metadata", {}) or {}
+                arch = meta.get("general.architecture", "?")
+            except Exception:
+                arch = "?"
+            logger.info(
+                f"  ✓ GGUF model loaded (llama.cpp, in-process) "
+                f"arch={arch} family={self._family} "
+                f"chat_template={self._chat_capable} "
+                f"n_gpu_layers={self._n_gpu_layers}"
+            )
             return True
         except Exception as e:
             logger.warning(f"  Failed to load GGUF model: {e}")
+            return False
+
+    def _detect_family(self) -> str:
+        """Identify the model family from filename / repo. Determines
+        which prompt-formatting hacks (Qwen reasoning) or chat templates
+        (Gemma) to use. TigerLLM is Gemma-2-it underneath."""
+        name = ((self._file or "") + " " + (self._repo or "") + " "
+                + (self._path or "")).lower()
+        if "tiger" in name or "gemma" in name:
+            return "gemma"
+        if "qwen3" in name or "qwen2.5" in name or "qwen2" in name:
+            return "qwen"
+        if "llama" in name:
+            return "llama"
+        return "unknown"
+
+    def _has_chat_template(self) -> bool:
+        """Whether the GGUF carries a built-in chat template usable
+        via create_chat_completion()."""
+        try:
+            meta = getattr(self._llm, "metadata", {}) or {}
+            tpl = meta.get("tokenizer.chat_template")
+            return bool(tpl)
+        except Exception:
             return False
 
     def unload(self) -> None:
@@ -319,20 +519,134 @@ class GGUFProcessor:
         prompt: str,
         temperature: float = 0.0,
         max_tokens: int = 1024,
-    ) -> str:
+        top_p: float = 1.0,
+        return_meta: bool = False,
+        json_schema: dict | None = None,
+        top_k: int | None = None,
+        min_p: float | None = None,
+        repeat_penalty: float | None = None,
+        seed: int | None = None,
+    ) -> str | tuple[str, dict]:
+        """Generate a completion. With return_meta=True, returns
+        (text, meta) where meta = {"finish_reason", "completion_tokens"} —
+        finish_reason=="length" means the answer was truncated at the cap
+        (the signal that distinguishes a genuine empty from a budget
+        overrun). With json_schema, generation is GRAMMAR-CONSTRAINED to
+        that JSON Schema (llama.cpp) so the output is always valid JSON of
+        the requested shape — used for structured role attribution.
+        Default returns just the text for back-compat."""
+        def _ret(text: str, fr: str = "", ct: int | None = None):
+            return (text, {"finish_reason": fr,
+                           "completion_tokens": ct}) if return_meta else text
+
         if not self._available or self._llm is None:
-            return ""
+            return _ret("")
+        import re
+
+        # JSON-schema-constrained output (llama.cpp converts the schema to a
+        # GBNF grammar). Works through any chat-capable family.
+        resp_fmt = ({"type": "json_object", "schema": json_schema}
+                    if json_schema else None)
+
+        # Optional sampling knobs (Gemma-team config: top_k=64, top_p=0.95,
+        # min_p=0.0, repeat_penalty=1.0, + a fixed seed for reproducibility).
+        # Only forwarded when set, so callers that omit them keep llama-cpp's
+        # defaults / prior behaviour.
+        sampling: dict = {}
+        if top_k is not None:
+            sampling["top_k"] = top_k
+        if min_p is not None:
+            sampling["min_p"] = min_p
+        if repeat_penalty is not None:
+            sampling["repeat_penalty"] = repeat_penalty
+        if seed is not None:
+            sampling["seed"] = seed
+
+        family = getattr(self, "_family", "unknown")
+
+        # ── Gemma / TigerLLM path ──
+        # TigerLLM-9B-it is Gemma-2 instruction-tuned. It MUST be
+        # called via its chat template; raw completion + a "Bengali:"
+        # / "English:" prompt confuses the instruction-tuned model and
+        # it generates to max_tokens of garbage every call (the source
+        # of the 10-hour stall). create_chat_completion applies the
+        # built-in <start_of_turn>user ... <end_of_turn> template and
+        # stops at <end_of_turn>, so output length is bounded by the
+        # actual answer.
+        if family == "gemma" and getattr(self, "_chat_capable", False):
+            try:
+                out = self._llm.create_chat_completion(  # type: ignore[union-attr]
+                    messages=[{"role": "user", "content": prompt}],
+                    temperature=temperature,
+                    max_tokens=max_tokens,
+                    top_p=top_p,
+                    response_format=resp_fmt,
+                    **sampling,
+                )
+                choice = out["choices"][0]
+                msg = choice["message"]
+                text = (msg.get("content") or "").strip()
+                fr = choice.get("finish_reason") or ""
+                ct = (out.get("usage") or {}).get("completion_tokens")
+                return _ret(text, fr, ct)
+            except Exception as e:
+                logger.warning(
+                    f"  GGUF chat generation failed (gemma): {e}")
+                return _ret("")
+
+        # ── Qwen reasoning-model path (original behaviour) ──
+        # Qwen3/3.5 emit <think>...</think> before the answer; disable
+        # via seeded empty think block + stop at </output>.
+        if family == "qwen":
+            try:
+                out = self._llm.create_completion(  # type: ignore[union-attr]
+                    prompt + "<think>\n\n</think>\n\n",
+                    temperature=temperature,
+                    max_tokens=max_tokens,
+                    top_p=top_p,
+                    stop=["</output>"],
+                )
+                text = out["choices"][0]["text"]
+                text = re.sub(r"<think>.*?</think>", "", text,
+                              flags=re.DOTALL)
+                text = re.sub(r"<think>.*$", "", text, flags=re.DOTALL)
+                fr = out["choices"][0].get("finish_reason") or ""
+                ct = (out.get("usage") or {}).get("completion_tokens")
+                return _ret(text.strip(), fr, ct)
+            except Exception as e:
+                logger.warning(f"  GGUF generation failed (qwen): {e}")
+                return _ret("")
+
+        # ── Generic fallback ──
+        # If a chat template is present, prefer it (proper stops);
+        # otherwise plain completion with newline-based stops.
         try:
+            if getattr(self, "_chat_capable", False):
+                out = self._llm.create_chat_completion(  # type: ignore[union-attr]
+                    messages=[{"role": "user", "content": prompt}],
+                    temperature=temperature,
+                    max_tokens=max_tokens,
+                    top_p=top_p,
+                )
+                choice = out["choices"][0]
+                msg = choice["message"]
+                fr = choice.get("finish_reason") or ""
+                ct = (out.get("usage") or {}).get("completion_tokens")
+                return _ret((msg.get("content") or "").strip(), fr, ct)
             out = self._llm.create_completion(  # type: ignore[union-attr]
                 prompt,
                 temperature=temperature,
                 max_tokens=max_tokens,
-                stop=["</output>", "\n\n\n"],
+                top_p=top_p,
+                stop=["\n\n\n"],
             )
-            return out["choices"][0]["text"].strip()
+            choice = out["choices"][0]
+            fr = choice.get("finish_reason") or ""
+            ct = (out.get("usage") or {}).get("completion_tokens")
+            return _ret(choice["text"].strip(), fr, ct)
         except Exception as e:
             logger.warning(f"  GGUF generation failed: {e}")
-            return ""
+            return _ret("")
 
 
 def _make_qwen_llm(cfg):
@@ -363,10 +677,25 @@ class QwenTranslator:
     #   - keep English/brands/numbers (code-switch fidelity = the point)
     #   - output-only (so no preamble pollutes the [en] line)
     _PROMPT = (
+        "{context}"
         "Translate this Bengali text to English. Translate faithfully — "
-        "do not add interpretation, summarize, or omit. Keep English "
-        "words, brand names, numbers, and proper nouns exactly as they "
-        "are. Output only the English translation, nothing else.\n\n"
+        "do not add interpretation, summarize, or omit. PRESERVE the "
+        "speaker's hedging, uncertainty and register (e.g. 'maybe', "
+        "'God willing', 'I can't say'); do NOT smooth into formal or "
+        "essay-like prose. Keep English words, brand names, and "
+        "proper nouns as they are.\n"
+        "If part of the text is garbled or unintelligible, translate "
+        "what is clear and mark the unclear span as [unclear] — do "
+        "not guess.\n"
+        "OUTPUT ENGLISH ONLY: never leave Bengali script in the "
+        "output, and never substitute a Bengali word with its "
+        "phonetic Roman spelling instead of translating it. (Proper "
+        "nouns / place / person names ARE written in normal English "
+        "romanization, e.g. Satkhira, Munshiganj, Amphan.)\n"
+        "Render Bengali number words as digits (e.g. আঠারো -> 18, "
+        "একশো আশি -> 180, পাঁচশ -> 500, পঞ্চাশ হাজার -> 50000).\n"
+        "Output only the English translation, nothing else.\n\n"
+        "{dyn}"
         "Bengali: {text}\n"
         "English:"
     )
@@ -375,7 +704,28 @@ class QwenTranslator:
         self._llm = _make_qwen_llm(cfg)
         self._temperature = cfg.temperature
         self._max_tokens = cfg.max_tokens
+        ctx_pieces = []
+        user_ctx = (getattr(cfg, "context", "") or "").strip()
+        if user_ctx:
+            ctx_pieces.append(user_ctx)
+        # Auto-load the survey wiki (same as QwenCorrector) so the
+        # translator also knows the survey domain vocabulary —
+        # helps it correctly handle code-switch English in input.
+        survey_ctx = _load_survey_wiki_for_prompt()
+        if survey_ctx:
+            ctx_pieces.append(survey_ctx)
+            logger.info(
+                "  QwenTranslator: loaded survey wiki vocabulary "
+                f"({len(survey_ctx)} chars)")
+        full_ctx = "\n\n".join(ctx_pieces)
+        self._context = f"Context: {full_ctx}\n\n" if full_ctx else ""
+        self._dyn = ""  # per-call rolling/entity context (caller-set)
         self._backend = cfg.backend
+
+    def set_context(self, dyn: str) -> None:
+        """Set per-call dynamic context (rolling prior + entity
+        memory). '' disables (default = production behaviour)."""
+        self._dyn = dyn or ""
 
     def load(self) -> bool:
         ok = self._llm.load()
@@ -399,21 +749,30 @@ class QwenTranslator:
         if not self._llm.is_loaded:
             return [""] * len(texts)
         out: list[str] = []
-        for t in texts:
-            src = (t or "").strip()
-            if not src:
-                out.append("")
-                continue
-            try:
-                resp = self._llm.generate(
-                    self._PROMPT.format(text=src),
-                    temperature=self._temperature,
-                    max_tokens=self._max_tokens,
-                ).strip()
-            except Exception as e:
-                logger.warning(f"  QwenTranslator failed on a segment: {e}")
-                resp = ""
-            out.append(resp)
+        progress = create_progress("Translation (LLM)")
+        with progress:
+            task = progress.add_task(
+                "QwenTranslator (per-segment)", total=len(texts))
+            for t in texts:
+                src = (t or "").strip()
+                if not src:
+                    out.append("")
+                    progress.advance(task)
+                    continue
+                try:
+                    resp = self._llm.generate(
+                        self._PROMPT.format(text=src,
+                                            context=self._context,
+                                            dyn=self._dyn),
+                        temperature=self._temperature,
+                        max_tokens=self._max_tokens,
+                    ).strip()
+                except Exception as e:
+                    logger.warning(
+                        f"  QwenTranslator failed on a segment: {e}")
+                    resp = ""
+                out.append(resp)
+                progress.advance(task)
         return out
 
 
@@ -968,13 +1327,62 @@ class PostProcessor:
                 self._translator.load()
         elif backend == "qwen":
             if self._qwen_translator is not None:
-                self._qwen_translator.load()
+                # If corrector & translator point at the SAME local GGUF,
+                # reuse the already-loaded llama.cpp instance instead of
+                # loading the 9B weights a second time (which would OOM
+                # the GPU and crash the translator stage).
+                shared = self._maybe_share_gguf_llm()
+                if shared is not None:
+                    self._qwen_translator._llm = shared
+                    logger.info(
+                        "  QwenTranslator: reusing corrector's GGUF "
+                        "instance (same model — avoids double VRAM load)"
+                    )
+                else:
+                    self._qwen_translator.load()
         else:
             # Legacy CT2 NLLB + Ollama path
             if self._config.translation.enabled:
                 self._translator.load()
             if self._config.refinement.enabled:
                 self._llm.load()
+
+    def _maybe_share_gguf_llm(self):
+        """If the qwen corrector and qwen translator both use the GGUF
+        backend pointing at the SAME local file (path OR repo+file),
+        return the corrector's already-loaded inner GGUFProcessor so the
+        translator can share it. Otherwise None.
+
+        Loading a 9B GGUF a second time on the same GPU usually OOMs
+        (the user hit exactly this: corrector loaded, translator's
+        Llama() raised 'Failed to load model from file')."""
+        c = self._qwen_corrector
+        t = self._qwen_translator
+        if c is None or t is None:
+            return None
+        c_cfg = self._config.qwen_corrector
+        t_cfg = self._config.qwen_translator
+        if getattr(c_cfg, "backend", "gguf") != "gguf":
+            return None
+        if getattr(t_cfg, "backend", "gguf") != "gguf":
+            return None
+        same_path = (
+            c_cfg.gguf_path
+            and t_cfg.gguf_path
+            and c_cfg.gguf_path == t_cfg.gguf_path
+        )
+        same_repo_file = (
+            c_cfg.gguf_repo
+            and c_cfg.gguf_file
+            and c_cfg.gguf_repo == t_cfg.gguf_repo
+            and c_cfg.gguf_file == t_cfg.gguf_file
+        )
+        if not (same_path or same_repo_file):
+            return None
+        inner = getattr(c, "_llm", None)
+        if inner is None or not getattr(inner, "is_loaded", False):
+            return None
+        return inner
 
     def unload(self) -> None:
         """Release all post-processing models."""
@@ -984,7 +1392,15 @@ class PostProcessor:
         if self._qwen_corrector is not None:
             self._qwen_corrector.unload()
         if self._qwen_translator is not None:
-            self._qwen_translator.unload()
+            # If translator shares corrector's inner GGUF, don't
+            # double-unload (corrector already released it).
+            shared = (
+                self._qwen_corrector is not None
+                and getattr(self._qwen_translator, "_llm", None)
+                is getattr(self._qwen_corrector, "_llm", None)
+            )
+            if not shared:
+                self._qwen_translator.unload()
 
     def process(
         self,

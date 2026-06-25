@@ -15,7 +15,7 @@ pipeline:
   batch_size: 8                     # Batch size for ASR inference
   num_workers: 4                    # DataLoader workers for preprocessing
   output_dir: "./outputs"           # Default output directory
-  low_vram: false                   # Sequential mode: one model at a time (~3 GB peak VRAM)
+  low_vram: true                    # Sequential mode: one model at a time (~3 GB peak VRAM). REQUIRED for LLM_1B on 8GB (ASR+pyannote would exceed 8GB if parallel).
 
 # ---------------------------------------------------------------------------
 # Audio preprocessing
@@ -23,19 +23,23 @@ pipeline:
 preprocessing:
   target_sample_rate: 16000         # All models expect 16kHz
   mono: true                        # Convert to mono
+  resampler: "soxr"                 # High-quality soxr resample (artifact-free up/downsample)
   loudness_normalization:
-    enabled: true
+    enabled: false                  # WhisperX-style: no loudness norm (feed real signal)
     target_lufs: -23.0              # EBU R128 standard
   vad:
+    # Rate-adaptive (native 8kHz/256-win telephony, else 16kHz/512-win) +
+    # model-neutral recall-leaning params. A/B-validated on 8kHz survey audio:
+    # 0.45/350ms keeps dialectal utterances whole (63 vs 124 regions @ 0.50/100).
     enabled: true
-    threshold: 0.5                  # Silero VAD speech probability threshold
+    threshold: 0.45                 # Silero VAD speech probability threshold (recall-leaning)
     min_speech_duration_ms: 250     # Minimum speech segment duration
-    min_silence_duration_ms: 100    # Minimum silence between speech segments
+    min_silence_duration_ms: 350    # Keep conversational pauses intact (don't shred dialectal runs)
   chunking:
-    max_duration_s: 30              # Maximum chunk duration in seconds
+    max_duration_s: 15              # 15s: Omnilingual's stable regime (= Unlimited's internal N). 30s triggers LLM-decoder repetition collapse on hard audio (A/B-proven).
     overlap_s: 2                    # Overlap between chunks for continuity
   noise_reduction:
-    enabled: true
+    enabled: false                  # WhisperX-style: NO denoise (robust ASR wants raw signal)
     method: "spectral_gating"       # "spectral_gating" or "none"
     prop_decrease: 0.75             # Noise reduction strength (0.0-1.0)
 
@@ -266,11 +270,21 @@ whisper:
   batch_size: 8                     # Number of chunks processed in parallel (lower if OOM)
 
 omnilingual:
-  model_card: "omniASR_LLM_300M_v2"     # Default: LLM variant for production use
-  # model_card: "omniASR_CTC_300M_v2"   # CTC variant (faster, less accurate)
-  # model_card: "omniASR_CTC_1B_v2"     # CTC 1B (better accuracy, needs 24GB)
-  zero_shot_model_card: "omniASR_LLM_300M_v2"  # For zero-shot new languages
-  max_audio_length_s: 40            # Omnilingual limit per chunk
+  model_card: "omniASR_LLM_1B_v2"       # LLM 1B: best accuracy that fits 8GB VRAM fp16 (~7GB). Paper: 6.6 WER / 1.2 CER aggregate, beats CTC at every size. Requires pipeline.low_vram=true.
+  # model_card: "omniASR_LLM_300M_v2"   # LLM 300M: ~2GB, prior default (7.8 WER / 1.9 CER)
+  # model_card: "omniASR_LLM_7B_v2"     # LLM 7B: best accuracy (6.0/1.1) but ~17GB fp16 — needs 4-bit + 24GB-RAM offline convert
+  # model_card: "omniASR_CTC_300M_v2"   # CTC variant (faster, less accurate than same-size LLM)
+  zero_shot_model_card: "omniASR_LLM_300M_v2"  # Zero-shot for unseen langs — kept small (Bengali is known, rarely used)
+  max_audio_length_s: 30            # Trimmed 40->30: caps KV-cache so LLM_1B stays within 8GB on long chunks
+
+titu:
+  # Grounding CTC witness. fastconformer is the validated default (standard
+  # orthography → complements dialectal Whisper in fusion; clean for number
+  # detection). Swap to conformer_large to A/B (more dialect/content, incl.
+  # flood months, but correlates with Whisper). See scripts/ab_titu_variants.py.
+  model_id: "hishab/titu_stt_bn_fastconformer"
+  # model_id: "hishab/titu_stt_bn_conformer_large"
+  batch_size: 8
 
 # ---------------------------------------------------------------------------
 # Qwen3-ASR engine — OPT-IN ONLY (not the default)
@@ -294,8 +308,9 @@ qwen:
 # ---------------------------------------------------------------------------
 diarization:
   backend: "pyannote"               # "pyannote" or "nemo_msdd"
-  model: "pyannote/speaker-diarization-3.1"  # Only for pyannote backend
-  auth_token: null                  # HuggingFace token (required for pyannote)
+  model: "pyannote/speaker-diarization-community-1"  # 2025 exclusive pipeline (better on noisy/multi-speaker)
+  # model: "pyannote/speaker-diarization-3.1"        # fallback (ties on clean 2-speaker clips)
+  auth_token: null                  # HuggingFace token (required; accept model terms on HF)
   min_speakers: null                # null = auto-detect
   max_speakers: null                # null = auto-detect
   min_segment_duration: 0.5         # Minimum segment duration in seconds
@@ -325,8 +340,8 @@ postprocessing:
     # gguf_repo+gguf_file (HF auto-download once). Set to a real
     # Qwen3.5-dense GGUF you have, e.g. the 9B (box) or 4B (6GB laptop).
     gguf_path: null
-    gguf_repo: "Qwen/Qwen3.5-9B-GGUF"
-    gguf_file: "qwen3.5-9b-q4_k_m.gguf"
+    gguf_repo: "unsloth/Qwen3.5-9B-GGUF"
+    gguf_file: "Qwen3.5-9B-UD-Q4_K_XL.gguf"
     n_gpu_layers: -1                  # -1 = all on GPU, 0 = CPU
     n_ctx: 4096
     n_threads: 8
@@ -345,8 +360,8 @@ postprocessing:
     enabled: true
     backend: "gguf"
     gguf_path: null
-    gguf_repo: "Qwen/Qwen3.5-9B-GGUF"
-    gguf_file: "qwen3.5-9b-q4_k_m.gguf"
+    gguf_repo: "unsloth/Qwen3.5-9B-GGUF"
+    gguf_file: "Qwen3.5-9B-UD-Q4_K_XL.gguf"
     n_gpu_layers: -1
     n_ctx: 4096
     n_threads: 8

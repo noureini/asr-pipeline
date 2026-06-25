@@ -1,12 +1,15 @@
 """
-Audio preprocessing module.
+Audio preprocessing module — telephony-robust, shared-spine front end.
 
-Handles the full preprocessing chain:
-  1. Format conversion (any format → 16kHz mono WAV via FFmpeg)
-  2. Loudness normalization (EBU R128 / -23 LUFS)
-  3. Voice Activity Detection (Silero VAD)
-  4. Noise reduction (spectral gating)
-  5. Chunking (30s segments with 2s overlap)
+Chain:
+  1. Format conversion → 16 kHz mono WAV (FFmpeg, high-quality soxr resample)
+  2. Loudness normalization — OFF by default (whole-file gain shifts VAD)
+  3. Noise reduction — OFF by default (ASR models are trained on noisy speech)
+  4. Voice Activity Detection (Silero VAD), RATE-ADAPTIVE: native 8 kHz /
+     256-sample profile for telephony, else 16 kHz / 512-sample; model-neutral,
+     recall-leaning params so neither ASR witness is favored.
+  5. Chunking: WhisperX-style greedy merge, cut only at silence, ≤15 s — the
+     single shared spine both ASR witnesses (titu + Whisper) transcribe.
 """
 
 from __future__ import annotations
@@ -112,7 +115,10 @@ class AudioPreprocessor:
         speech_timestamps = None
         non_speech_regions: list[tuple[float, float, str]] = []
         if self._config.vad.enabled:
-            speech_timestamps = self._detect_speech(wav_path)
+            # Rate-adaptive VAD runs on the ORIGINAL audio at its native rate
+            # (8 kHz telephony stays 8 kHz for Silero's 256-win profile).
+            native_sr = self.get_audio_metadata(audio_path).sample_rate
+            speech_timestamps = self._detect_speech(audio_path, native_sr)
             self._speech_timestamps = speech_timestamps
             total_speech = sum(
                 (end - start) for start, end in speech_timestamps
@@ -164,9 +170,11 @@ class AudioPreprocessor:
         """Convert any audio format to 16kHz mono WAV using FFmpeg."""
         output_path = self._work_dir / "normalized.wav"
 
-        cmd = [
-            "ffmpeg", "-y",
-            "-i", str(audio_path),
+        cmd = ["ffmpeg", "-y", "-i", str(audio_path)]
+        # High-quality soxr resampling (artifact-free up/downsample to 16 kHz).
+        if self._config.resampler == "soxr":
+            cmd += ["-af", "aresample=resampler=soxr:precision=28"]
+        cmd += [
             "-ar", str(self._config.target_sample_rate),
             "-ac", "1" if self._config.mono else "2",
             "-c:a", "pcm_s16le",
@@ -265,25 +273,43 @@ class AudioPreprocessor:
             self._vad_model = model
         return self._vad_model
 
-    def _detect_speech(self, wav_path: Path) -> list[tuple[float, float]]:
+    def _detect_speech(
+        self, audio_path: Path, native_sr: int
+    ) -> list[tuple[float, float]]:
         """
-        Detect speech regions using Silero VAD.
+        Detect speech regions using Silero VAD, rate-adaptively.
+
+        Runs VAD at the source's NATIVE rate when it is 8 kHz (Silero's
+        256-sample / 8 kHz profile), otherwise at 16 kHz (512-sample profile).
+        Pushing 8 kHz telephony through the 16 kHz profile is a temporal
+        mismatch that can drop valid speech frames. Timestamps are returned in
+        SECONDS, so they apply unchanged to the 16 kHz wav used downstream.
 
         Returns list of (start_s, end_s) tuples for speech segments.
         """
-        waveform, sr = torchaudio.load(str(wav_path))
-        waveform = waveform.squeeze()
+        # Silero ships only 8 kHz and 16 kHz profiles; dispatch by source rate.
+        vad_sr = 8000 if native_sr == 8000 else 16000
 
-        # Silero VAD expects 16kHz
-        if sr != 16000:
-            resampler = torchaudio.transforms.Resample(sr, 16000)
-            waveform = resampler(waveform)
-            sr = 16000
+        # Decode the ORIGINAL at the VAD rate (passthrough when already that
+        # rate; soxr downsample for anything higher). This gives true native
+        # 8 kHz content for VAD rather than 8 kHz upsampled to 16 kHz.
+        vad_wav = self._work_dir / f"vad_{vad_sr}.wav"
+        cmd = ["ffmpeg", "-y", "-i", str(audio_path)]
+        if self._config.resampler == "soxr":
+            cmd += ["-af", "aresample=resampler=soxr:precision=28"]
+        cmd += [
+            "-ar", str(vad_sr), "-ac", "1", "-c:a", "pcm_s16le",
+            "-loglevel", "error", str(vad_wav),
+        ]
+        subprocess.run(cmd, check=True, capture_output=True, text=True)
+
+        waveform, sr = torchaudio.load(str(vad_wav))
+        waveform = waveform.squeeze()
 
         model = self._get_vad_model()
 
-        # Get speech timestamps
-        speech_timestamps = []
+        # Get speech timestamps (Silero auto-selects 256-win @8k / 512-win @16k)
+        speech_timestamps: list[tuple[float, float]] = []
         try:
             from silero_vad import get_speech_timestamps  # type: ignore[import]
 
@@ -337,46 +363,59 @@ class AudioPreprocessor:
             # Fallback: fixed-window chunking (VAD disabled or no speech found)
             return self._create_fixed_chunks(waveform, sr, total_duration, chunk_dir)
 
-        # ── Phase 1: Merge adjacent speech segments up to max_duration ──
-        # Combine close-together speech segments into groups that Whisper
-        # can process as a single chunk, cutting only at silence gaps.
-        merged_groups: list[tuple[float, float]] = []
-        group_start = speech_timestamps[0][0]
-        group_end = speech_timestamps[0][1]
+        # ── WhisperX-style greedy merge ─────────────────────────────────
+        # Faithful port of whisperx/vads/vad.py:Vad.merge_chunks. Pack
+        # VAD speech segments and close a chunk ONLY when adding the next
+        # would make the span exceed max_dur — at the previous segment
+        # boundary; never cut inside a speech segment; NO silence/gap
+        # threshold. Our old "close on gap>3s" heuristic was homegrown
+        # and unvalidated; WhisperX's minimal approach is the proven one.
+        # Split any single VAD segment longer than max_dur at its
+        # QUIETEST interior point (WhisperX splits an over-long segment
+        # at the lowest-VAD-score frame, NOT evenly — an even split
+        # would cut mid-word). We use min short-time energy as a robust
+        # proxy for "most silence-like", restricted to the 30–70%
+        # interior so pieces stay balanced, recursing until all ≤max_dur.
+        mono_wf = waveform.mean(0) if waveform.dim() > 1 else waveform
 
-        for seg_start, seg_end in speech_timestamps[1:]:
-            gap = seg_start - group_end
-            new_group_duration = seg_end - group_start
+        def _split_quiet(s: float, e: float) -> list[tuple[float, float]]:
+            if e - s <= max_dur:
+                return [(s, e)]
+            a, b = int(s * sr), int(e * sr)
+            seg = mono_wf[a:b]
+            win = max(1, int(0.05 * sr))            # 50 ms frames
+            lo, hi = int(len(seg) * 0.3), int(len(seg) * 0.7)
+            best_i, best_v = None, None
+            i = lo
+            while i + win <= hi:
+                v = float(seg[i:i + win].pow(2).mean())
+                if best_v is None or v < best_v:
+                    best_v, best_i = v, i
+                i += win
+            mid = (s + e) / 2.0 if best_i is None else \
+                s + (best_i + win / 2) / sr
+            return _split_quiet(s, mid) + _split_quiet(mid, e)
 
-            # Merge if: adding this segment doesn't exceed max_duration
-            # AND the gap between segments is small (< 3s silence)
-            if new_group_duration <= max_dur and gap < 3.0:
-                group_end = seg_end
-            else:
-                merged_groups.append((group_start, group_end))
-                group_start = seg_start
-                group_end = seg_end
+        norm_segs: list[tuple[float, float]] = []
+        for s, e in speech_timestamps:
+            norm_segs.extend(_split_quiet(s, e))
 
-        merged_groups.append((group_start, group_end))
-
-        # ── Phase 2: Split groups that still exceed max_duration ─────────
-        # Find the largest internal silence gap and split there.
         final_boundaries: list[tuple[float, float]] = []
-        for g_start, g_end in merged_groups:
-            if (g_end - g_start) <= max_dur:
-                final_boundaries.append((g_start, g_end))
-            else:
-                # Collect internal VAD segments within this group
-                internal = [
-                    (s, e) for s, e in speech_timestamps
-                    if s >= g_start and e <= g_end
-                ]
-                final_boundaries.extend(
-                    self._split_at_best_gap(internal, max_dur)
-                )
+        cs, ce = norm_segs[0]
+        for s, e in norm_segs[1:]:
+            if e - cs > max_dur and ce - cs > 0:
+                final_boundaries.append((cs, ce))
+                cs = s
+            ce = e
+        final_boundaries.append((cs, ce))
 
         # ── Phase 3: Add padding and extract chunk WAV files ────────────
-        padding = 0.2  # seconds of context before/after each chunk
+        # NO overlap (padding = 0): the Stage-1 decision is ONE clean shared
+        # spine. titu reads each spine chunk individually (CTC, native word
+        # timestamps); cross-boundary context for the Whisper witness is handled
+        # at fusion via the merged-window read (Whisper reads merged runs of
+        # consecutive spine chunks), not by overlapping+de-duping chunks here.
+        padding = 0.0
         chunks: list[AudioChunk] = []
 
         for chunk_id, (c_start, c_end) in enumerate(final_boundaries):

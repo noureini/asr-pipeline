@@ -106,12 +106,19 @@ class ASRSegment(BaseModel):
 
 
 class WordSegment(BaseModel):
-    """Word-level timing from WhisperX alignment (high-resource only)."""
+    """Word-level timing (titu native CTC timestamps).
+
+    `speaker_id` is filled in at alignment time by word-level speaker
+    attribution (WhisperX-style): each word is tagged with the
+    diarization turn it overlaps, which lets us split a chunk into
+    speaker-pure segments instead of guessing one speaker per chunk.
+    """
 
     word: str
     start_s: float
     end_s: float
     confidence: float = Field(default=0.0, ge=0.0, le=1.0)
+    speaker_id: Optional[str] = None
 
 
 # Fix forward references
@@ -202,6 +209,29 @@ class ProcessedSegment(BaseModel):
     source_file: Optional[str] = None
     absolute_start: Optional[str] = None  # ISO 8601 datetime
     absolute_end: Optional[str] = None  # ISO 8601 datetime
+    # Targeted human-QA flag: set when the two witnesses disagreed,
+    # a number needs verifying, or the fusion had to mark text unclear.
+    needs_review: bool = False
+    review_reason: str = ""
+
+    # Fusion audit trail: the model's <think> reasoning for this segment
+    # (why it trusted one witness over the other). Empty if the model
+    # skipped the block. fusion_fallback=True means the LLM produced no
+    # usable Bengali and the FLUENT raw line was substituted (coverage
+    # save) — these segments need review and inflate WER-on-output.
+    reasoning: str = ""
+    fusion_fallback: bool = False
+    # Raw witnesses for the snap audit: titu (LITERAL) and Whisper N-best
+    # (FLUENT), the inputs the fusion saw. A vocab/proper-noun term that
+    # appears in the output but in NEITHER witness is a context-snap
+    # (model inserted it from the anchor, not the audio).
+    witness_literal: str = ""
+    witness_fluent: str = ""
+    # GER guard metrics (calibration data): grapheme distance from the fused
+    # [bn] to its NEAREST witness, and titu-vs-Whisper agreement. None when
+    # the guard is off. Used by scripts/ger_calibrate.py to set snap_tau.
+    ger_min_dist: Optional[float] = None
+    ger_witness_agree: Optional[float] = None
 
 
 # =============================================================================

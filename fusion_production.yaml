@@ -1,0 +1,125 @@
+# =============================================================================
+# Production pipeline: titu ASR + two-witness fusion (+ in-call translation)
+# =============================================================================
+# The validated, fully-local, fully-open, hallucination-resistant stack:
+#
+#   titu (CTC, phonetic)  ‖  Whisper-regional (seq2seq, CT2, fluent)  2 witnesses
+#     → Gemma-3-12B-it UD-Q4 reconciles into clean Bengali [bn] AND
+#       translates to English [en] in ONE call (Gemma [en] A/B-validated faithful)
+#
+# titu is the primary engine (Stage 3, gives the .raw.txt). Whisper runs as
+# the second witness inside the fusion stage (Stage 6). Recovers semantic
+# near-misses (flood vs "sister-no"), fixes proper nouns from the phonetic
+# witness (Pubali Bank, SSC), keeps numbers/entities faithful.
+# =============================================================================
+
+pipeline:
+  device: "cuda"
+  compute_type: "float16"
+  batch_size: 8
+  num_workers: 4
+  output_dir: "./outputs/v2_deliverable"
+  low_vram: true
+  force_engine: "titu"          # primary ASR / witness #1
+
+titu:
+  # Witness #1 model. fastconformer = validated default (complements dialectal
+  # Whisper in fusion). conformer_large = A/B (more dialect/content). See
+  # scripts/ab_titu_variants.py.
+  model_id: "hishab/titu_stt_bn_fastconformer"
+  batch_size: 8
+
+preprocessing:
+  target_sample_rate: 16000
+  mono: true
+  resampler: "soxr"               # high-quality artifact-free resample
+  loudness_normalization:
+    enabled: false
+  vad:                            # rate-adaptive + recall-leaning (A/B-validated, Stage 1)
+    enabled: true
+    threshold: 0.45
+    min_speech_duration_ms: 250
+    min_silence_duration_ms: 350
+  chunking:
+    max_duration_s: 15
+    overlap_s: 2
+  noise_reduction:
+    enabled: false
+
+diarization:
+  backend: "pyannote"
+  model: "pyannote/speaker-diarization-community-1"  # 2025 exclusive pipeline (Stage 4, A/B 2026-06-25)
+  min_speakers: 2                 # survey floor: always enumerator + respondent
+  max_speakers: 4                 # allow up to 2 extra voices; cap blocks noise over-splitting
+  min_segment_duration: 0.5
+
+alignment:
+  # OFF by design: titu emits native CTC word timestamps (validated CLEAN —
+  # 534/534, 0 issues), so no forced aligner is needed. MMS_FA is a no-op on
+  # Bengali (strips non-Latin); arijitx wav2vec2 was A/B-tested (2026-06-25) and
+  # DRIFTS ~2.15s median on this 8kHz dialectal audio, scrambling speaker
+  # attribution. titu-native timestamps are the source of truth.
+  enabled: false                 # forced alignment disabled (titu CTC times used directly)
+
+# ---------------------------------------------------------------------------
+# Stage 6: two-witness fusion + dedicated NMT translation
+# ---------------------------------------------------------------------------
+postprocessing:
+  translation_backend: "fusion"
+  fusion:
+    whisper_model: "bengaliAI/tugstugi_bengaliai-regional-asr_whisper-medium"
+    whisper_ct2_path: "models/tugstugi_ct2"   # CT2 batched N-best (~1.9x); HF fallback if missing
+    gguf_repo: "unsloth/gemma-3-12b-it-GGUF"
+    gguf_file: "gemma-3-12b-it-UD-Q4_K_XL.gguf"
+    gguf_n_gpu_layers: -1        # all on GPU (12B Q4 fits 8GB)
+    # ── generation hyperparameters ──
+    # temp=0 (GREEDY) — chosen on EVIDENCE, not the Gemma-rec default (1.0).
+    # Two findings (2026-06-25): (1) a clean temp-only A/B showed temp=0 vs 1.0
+    # is a WASH on accuracy once repeat_penalty=1.0; (2) the decisive near-empty
+    # test — on a backchannel segment where BOTH witnesses said only "okay okay",
+    # temp=1.0 confabulated a fabricated survey turn in 2 of 3 runs (an invented
+    # year, then a Devanagari token), while temp=0 stayed grounded every time and
+    # gave the LOWEST flag count. So greedy loses no accuracy and gains
+    # confabulation-resistance. repeat_penalty MUST stay 1.0 — the llama-cpp
+    # default 1.1 penalises the legitimate repetition in dialectal speech and
+    # drops repeated entities (e.g. সুরমা নদী). top_k/top_p/min_p are inert at
+    # temp=0 (argmax) but kept for parity. The deterministic GER + foreign-script
+    # guards run after generation as defence-in-depth.
+    temperature: 0.0             # greedy — see note above (NOT the Gemma-rec 1.0)
+    top_p: 0.95
+    top_k: 64
+    min_p: 0.0                   # override llama's 0.05 default
+    repeat_penalty: 1.0          # MUST stay 1.0
+    seed: 1234                   # covers rare argmax ties + the CT2 sampler
+    # KV-cache sizing — the fix for the 105-min stage. 8192 over-
+    # allocated a 3GB KV cache that overcommitted the 8GB card → PCIe
+    # paging → ~4 tok/s. 2048 + flash + q8 KV fits on-card → ~3x+.
+    n_ctx: 2048
+    flash_attn: true
+    kv_quant: true               # q8 KV: near-lossless, fits 8GB fast,
+                                 # leaves room for N-best prompts
+    whisper_nbest: 3             # Whisper top-3 hypotheses → N-best fusion
+    fusion_max_tokens: 1024      # bounded <think> + [bn] + [en] + headroom
+    # GER guard: constrain fused [bn] to the witness pool. number-abstain +
+    # agreement flags are always on; snap is OFF until calibrated.
+    ger_guard: true
+    ger_snap: false        # observe-mode first → calibrate ger_snap_tau
+    ger_snap_tau: 0.72     # set from scripts/ger_calibrate.py, then ger_snap: true
+    # Roles now come from Stage-5 word-level speaker attribution
+    # (titu CTC word timestamps → speaker-pure segments → cluster→role
+    # mapping). The per-segment LLM role stage was removed.
+    # ── fusion backend ──
+    # "server" continuous batching only helps a SMALL model that leaves
+    # VRAM for KV slots (4B/8B). The 12B fills 8GB and PAGES with slots
+    # (decode 1.75 tok/s — proven). So keep "inprocess" for the 12B.
+    fusion_backend: "inprocess"
+    n_parallel: 3
+    # ── prompt templates: edit the YAML, not the code ──
+    prompts_file: "config/prompts/bn_survey.yaml"
+
+output:
+  format: "all"                  # txt + json + srt
+  transcription_style: "intelligent_verbatim"
+  include_raw_text: true
+  include_translation: true
+  timestamp_format: "HH:MM:SS"

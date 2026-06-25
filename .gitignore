@@ -60,6 +60,15 @@ outputs/
 # ==============================================================================
 models/
 
+# Vendored llama.cpp build artifacts — large binaries (one .so is ~198 MB,
+# over GitHub's 100 MB limit) and NOT needed at runtime (the pip
+# llama-cpp-python package runs the GGUF). Versioned .so.N names dodge the
+# *.so rule above, so ignore the whole dir. Used only by optional server mode.
+vendor/llamacpp/
+
+# Eval / experiment outputs — may reference real survey interview IDs
+results/
+
 # ==============================================================================
 # Datasets (too large for git)
 # ==============================================================================
@@ -103,3 +112,4 @@ nul
 # Claude Code (local settings)
 # ==============================================================================
 .claude/
+data/

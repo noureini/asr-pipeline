@@ -1,0 +1,218 @@
+% Compile with pdflatex (no Bengali glyphs used, on purpose).
+% For a more modern look use \usetheme{metropolis} (needs the package);
+% Madrid is built-in and always compiles.
+\documentclass[aspectratio=169,10pt]{beamer}
+\usetheme{Madrid}
+\usecolortheme{seahorse}
+\usepackage{booktabs}
+\usepackage{tikz}
+\usetikzlibrary{arrows.meta, positioning}
+\setbeamertemplate{navigation symbols}{}
+\setbeamertemplate{caption}[numbered]
+
+\title[Local Bengali ASR Pipeline]{A Fully-Local, Open-Source ASR Pipeline\\for Bengali Climate-Survey Interviews}
+\subtitle{Two-Witness Fusion + LLM Reconciliation --- Demonstration \& Results}
+\author{MMI Bangladesh}
+\institute{Innovations for Poverty Action (IPA)}
+\date{\today}
+
+\begin{document}
+
+\begin{frame}\titlepage\end{frame}
+
+% ---------------------------------------------------------------
+\begin{frame}{The Challenge}
+  \textbf{Goal:} turn coastal-Bangladesh survey interviews into clean,
+  searchable transcripts \emph{with English translation}.
+  \vspace{0.4em}
+  \begin{itemize}
+    \item \textbf{Hard audio} --- field recordings transcoded to 8\,kHz,
+          $\sim$12\,kbps (telephony-grade); heavy compression.
+    \item \textbf{Colloquial, regional Bengali} --- dialect forms, fast
+          speech, code-switching (English banking / survey terms).
+    \item \textbf{Faithfulness is paramount} --- numbers, dates and
+          entities must not be invented (a survey can't have $250 \to 2.5$).
+    \item \textbf{Data privacy} --- sensitive interviews $\Rightarrow$ must
+          run \textbf{fully local} and \textbf{open-source}.
+  \end{itemize}
+  \vspace{0.3em}
+  \begin{block}{Constraint}
+    Everything runs on a single laptop GPU (8\,GB VRAM). No cloud, no API.
+  \end{block}
+\end{frame}
+
+% ---------------------------------------------------------------
+\begin{frame}{Why a New Pipeline?}
+  \begin{columns}[T]
+    \begin{column}{0.5\textwidth}
+      \textbf{What doesn't work}
+      \begin{itemize}
+        \item A \emph{single} ASR engine on this audio makes too many errors.
+        \item A \emph{single} LLM ``clean this up'' prompt \textbf{hallucinates}
+              --- it rewrites correct text (53\% vs 5\% CER in the literature).
+        \item Dedicated NMT (IndicTrans2) \textbf{corrupted numbers} on our
+              data ($6\to696$, $250\to35$).
+      \end{itemize}
+    \end{column}
+    \begin{column}{0.5\textwidth}
+      \textbf{Our design}
+      \begin{itemize}
+        \item \textbf{Two complementary witnesses} (ROVER / generative
+              error-correction): a phonetic engine + a fluent engine.
+        \item An \textbf{LLM judge} reconciles them into one faithful
+              transcript \emph{and} translates, in one constrained call.
+        \item \textbf{N-best} candidates give the judge the evidence to
+              disambiguate (ward vs.\ world).
+      \end{itemize}
+    \end{column}
+  \end{columns}
+\end{frame}
+
+% ---------------------------------------------------------------
+\begin{frame}{The Pipeline}
+  \centering
+  \begin{tikzpicture}[
+      node distance=8mm and 11mm, >=Latex,
+      box/.style={draw, rounded corners, align=center, font=\small,
+                  minimum height=9mm, fill=blue!8},
+      eng/.style={box, fill=green!10},
+      out/.style={box, fill=orange!12}]
+    \node[box] (audio) {Audio\\(8\,kHz)};
+    \node[eng, right=of audio, yshift=7mm] (titu)
+        {\textbf{titu} (CTC)\\\scriptsize phonetic witness};
+    \node[eng, right=of audio, yshift=-7mm] (whisper)
+        {\textbf{Whisper}-regional\\\scriptsize fluent witness, N-best $\times3$};
+    \node[box, right=of titu, yshift=-7mm, fill=blue!12] (gemma)
+        {\textbf{Gemma-3-12B}\\\scriptsize fusion + translation\\\scriptsize + role attribution};
+    \node[out, right=of gemma] (tr) {Transcript\\\scriptsize bn-raw / bn / en\\\scriptsize +\,roles};
+    \node[out, below=6mm of tr] (qa) {QA worklist\\\scriptsize flagged numbers};
+    \draw[->] (audio) -- (titu);
+    \draw[->] (audio) -- (whisper);
+    \draw[->] (titu) -- (gemma);
+    \draw[->] (whisper) -- (gemma);
+    \draw[->] (gemma) -- (tr);
+    \draw[->] (gemma) -- (qa);
+  \end{tikzpicture}
+  \vspace{0.6em}
+  \begin{itemize}\small
+    \item Models load \emph{sequentially} (load $\to$ use $\to$ unload) to
+          fit one 8\,GB GPU.
+    \item Output: raw ASR $\to$ corrected Bengali $\to$ English, with
+          \textsc{enumerator}/\textsc{respondent} roles and segment splitting.
+  \end{itemize}
+\end{frame}
+
+% ---------------------------------------------------------------
+\begin{frame}{Key Design Decisions}
+  \small
+  \begin{table}
+  \begin{tabular}{@{}p{0.30\textwidth} p{0.62\textwidth}@{}}
+    \toprule
+    \textbf{Decision} & \textbf{Why} \\
+    \midrule
+    Gemma-3-12B (Q4) & Best Bengali model that fits 8\,GB; beat a 4B
+        model on faithful numbers ($250$, not $2.5$). \\
+    Two witnesses & Phonetic (titu) anchors sound; fluent (Whisper) anchors
+        structure --- complementary errors cancel. \\
+    N-best fusion & Multiple Whisper readings let the judge pick the right
+        word (ward vs.\ world). \\
+    Content-based roles & Speaker labels from \emph{what is said} (Q vs.\ A),
+        not error-prone voice clustering. \\
+    Constrained prompt & Explicit rules: translate meaning, keep numbers
+        exact, code-switch only genuine English. \\
+    \bottomrule
+  \end{tabular}
+  \end{table}
+  \centering\footnotesize
+  Fully local $\cdot$ fully open-source $\cdot$ deterministic (reproducible).
+\end{frame}
+
+% ---------------------------------------------------------------
+\begin{frame}{Results --- Accuracy (Demo: 1 interview, 73\,min)}
+  \textbf{Validated on known cases:}
+  \begin{itemize}\small
+    \item \textbf{Numbers / sense:} ``six people'', ``crop is destroyed'',
+          \emph{250} (not 2.5) --- correctly recovered.
+    \item \textbf{Disambiguation:} ``\textbf{ward} number one'' (N-best fixed
+          the earlier ``world'' error).
+    \item \textbf{Code-switching:} Pubali Bank, NGO, loan, salinity kept
+          correctly; \emph{no invented} English words.
+    \item \textbf{Structure:} clean \textsc{enumerator}/\textsc{respondent}
+          turns; mixed segments split.
+  \end{itemize}
+  \vspace{0.3em}
+  \begin{block}{Honest assessment}
+    \small
+    $\sim$97\% of segments are coherent and usable for \textbf{qualitative}
+    analysis (livelihoods, floods, loans). \textbf{Quantitative} figures
+    must be human-verified: compound numbers still slip occasionally on this
+    audio grade --- which is \emph{why every number is auto-flagged}.
+  \end{block}
+\end{frame}
+
+% ---------------------------------------------------------------
+\begin{frame}{Built-in Quality Assurance}
+  \begin{columns}[T]
+    \begin{column}{0.55\textwidth}
+      The pipeline emits a \textbf{review worklist} --- only the segments a
+      human should check:
+      \begin{itemize}\small
+        \item any segment containing a \textbf{number}
+        \item where the two witnesses \textbf{disagree}
+        \item where the model marked text \textbf{[unclear]}
+      \end{itemize}
+      \vspace{0.4em}
+      Reviewers verify \textbf{a handful of flagged spots}, not all 200+
+      segments --- targeted, efficient QA.
+    \end{column}
+    \begin{column}{0.42\textwidth}
+      \begin{block}{Why it matters}
+        \small The audio quality ceiling cannot be fully removed locally.
+        Instead of hiding it, the pipeline \textbf{surfaces} exactly what to
+        double-check --- honest, auditable output.
+      \end{block}
+    \end{column}
+  \end{columns}
+\end{frame}
+
+% ---------------------------------------------------------------
+\begin{frame}{Next Steps --- To Production}
+  \begin{enumerate}\small
+    \item \textbf{Compute upgrade (16\,GB GPU)} --- the single biggest lever:
+      \begin{itemize}\footnotesize
+        \item No memory paging $\Rightarrow$ fusion runs at full speed
+              ($\sim$1\,hr $\to$ $\sim$15\,min per interview via batching).
+        \item Run \textbf{Gemma-3-27B} (does not fit 8\,GB) $\Rightarrow$
+              better number-faithfulness.
+      \end{itemize}
+    \item \textbf{Batch processing} --- run all interviews unattended.
+    \item \textbf{Human-in-the-loop QA} --- analysts verify the flagged
+          numbers against audio (the worklist drives this).
+    \item \textbf{Optional frontier benchmark} --- a private Claude/Opus track
+          to spot-check the open-source pipeline's accuracy.
+  \end{enumerate}
+  \vspace{0.3em}
+  \begin{block}{Status}
+    \small The pipeline is \textbf{complete and validated}. Remaining work is
+    \emph{hardware} (16\,GB GPU) and \emph{operations} (batch + QA), not
+    research.
+  \end{block}
+\end{frame}
+
+% ---------------------------------------------------------------
+\begin{frame}{Summary}
+  \begin{itemize}
+    \item A \textbf{fully-local, open-source} Bengali ASR + translation
+          pipeline, privacy-safe by design.
+    \item \textbf{Two-witness fusion + LLM reconciliation} delivers faithful,
+          readable transcripts with English translation and speaker roles.
+    \item \textbf{Honest, auditable accuracy:} strong for qualitative analysis;
+          numbers auto-flagged for targeted human QA.
+    \item \textbf{Production = compute + operations}, not new research ---
+          a 16\,GB GPU makes it fast and even more accurate.
+  \end{itemize}
+  \vfill
+  \centering\large Thank you --- questions welcome.
+\end{frame}
+
+\end{document}

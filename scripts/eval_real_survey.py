@@ -88,18 +88,29 @@ def num_norm(s: str) -> str:
     return re.sub(r"\s+", " ", s).strip()
 
 
-def _lev(ref: list, hyp: list) -> int:
-    n, m = len(ref), len(hyp)
-    d = list(range(m + 1))
-    for i in range(1, n + 1):
-        p = d[0]
-        d[0] = i
-        for j in range(1, m + 1):
-            c = d[j]
-            cost = 0 if ref[i - 1] == hyp[j - 1] else 1
-            d[j] = min(d[j] + 1, d[j - 1] + 1, p + cost)
-            p = c
-    return d[m]
+try:
+    import editdistance as _ed
+
+    def _lev(ref, hyp) -> int:
+        # C-backed Levenshtein (works on str OR list[str]) — identical
+        # result to the pure-Python DP below, ~100-1000x faster.
+        # Required for document-level CER (tens of thousands of chars).
+        return int(_ed.eval(ref, hyp))
+
+except ImportError:  # pragma: no cover - pure-Python fallback
+
+    def _lev(ref, hyp) -> int:
+        n, m = len(ref), len(hyp)
+        d = list(range(m + 1))
+        for i in range(1, n + 1):
+            p = d[0]
+            d[0] = i
+            for j in range(1, m + 1):
+                c = d[j]
+                cost = 0 if ref[i - 1] == hyp[j - 1] else 1
+                d[j] = min(d[j] + 1, d[j - 1] + 1, p + cost)
+                p = c
+        return d[m]
 
 
 def cer(ref: str, hyp: str) -> float:

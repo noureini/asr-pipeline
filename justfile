@@ -73,16 +73,30 @@ quality-speakers folder *flags:
 # ─── ASR pipeline ─────────────────────────────────────────────────────────
 
 # Transcribe a single audio file. Usage: just transcribe path/to.wav bn
-transcribe file lang="bn" *flags:
+transcribe file lang="bn" *flags='':
     uv run asr-pipeline transcribe "{{file}}" --language {{lang}} {{flags}}
 
 # Transcribe + translate to English
-translate file lang="bn" *flags:
+translate file lang="bn" *flags='':
     uv run asr-pipeline transcribe "{{file}}" --language {{lang}} --translate {{flags}}
 
 # Batch-transcribe a folder of audio
-transcribe-folder folder lang="bn" *flags:
+transcribe-folder folder lang="bn" *flags='':
     uv run asr-pipeline transcribe "{{folder}}" --language {{lang}} {{flags}}
+
+# ─── Bengali two-witness fusion (production path) ─────────────────────────
+
+# Transcribe ONE Bengali interview with the two-witness fusion pipeline
+# (titu ‖ Whisper → Gemma-3-12B, greedy, GER guards). Outputs → ./outputs.
+# Usage: just fusion path/to/interview.m4a
+#        just fusion path/to.m4a -o ./out -p "Coastal Survey 2026" --log-file run.log
+fusion file *flags='':
+    uv run asr-pipeline transcribe "{{file}}" -l ben -c fusion_production.yaml {{flags}}
+
+# Batch-transcribe a folder of Bengali interviews (Survey Solutions layout)
+# with the fusion pipeline. Resume-safe. Usage: just fusion-folder ./interviews
+fusion-folder folder *flags='':
+    uv run asr-pipeline transcribe-folder "{{folder}}" -l ben -c fusion_production.yaml {{flags}}
 
 # ─── Research experiments ─────────────────────────────────────────────────
 
@@ -174,10 +188,47 @@ check-qwen-asr *flags:
 eval-omni-fleurs10 *flags:
     uv run python scripts/eval_omni_fleurs10.py {{flags}}
 
+# FAST in-process CER eval (model loaded ONCE, no diarization/alignment).
+# Usage: just eval-omni-inproc omniASR_LLM_1B_v2 --results results/omni_inproc_1b.json
+eval-omni-inproc card="omniASR_LLM_1B_v2" *flags='':
+    uv run python scripts/eval_omni_inproc.py --model-card {{card}} {{flags}}
+
+# Side-by-side compare two eval_omni_inproc result JSONs (A vs B + verdict)
+compare-omni a="results/omni_inproc_300m.json" b="results/omni_inproc_1b.json":
+    uv run python scripts/compare_omni_inproc.py "{{a}}" "{{b}}"
+
 # THE production gate: real survey interview vs human ground truth.
 # stem = interview filename without extension. LONG run (~hour audio).
 eval-real-survey stem *flags:
     uv run python scripts/eval_real_survey.py --stem "{{stem}}" {{flags}}
+
+# FAST production gate: in-process, GPU-verified, RESUMABLE (no
+# diarization/alignment, model loaded once). Re-run to resume.
+eval-real-survey-inproc stem *flags='':
+    uv run python scripts/eval_real_survey_inproc.py --stem "{{stem}}" {{flags}}
+
+# Part B: standalone whole-doc polisher (correct + translate +
+# speaker turn-tags via sliding-window local LLM) -> aligned
+# review table (CSV/XLSX). Input = cached ASR chunks. RESUMABLE.
+polish stem *flags='':
+    uv run python scripts/polish_transcript.py --stem "{{stem}}" {{flags}}
+
+# Whole-file long-form ASR with the Unlimited model (NO chunking;
+# internal N=15/M=1 conditioning spans the WHOLE part). Document-
+# level, NO timestamps. The real test of long-form quality.
+wholefile stem *flags='':
+    uv run python scripts/transcribe_wholefile_unlimited.py --stem "{{stem}}" {{flags}}
+
+# Per-part pyannote 3.1 speaker diarization (RESUMABLE). Run
+# BEFORE `just assemble` to get ENUMERATOR/RESPONDENT labels.
+diarize stem *flags='':
+    uv run python scripts/diarize_parts.py --stem "{{stem}}" {{flags}}
+
+# Deterministic assembler (NO LLM): Path A per-segment outputs ->
+# pipeline JSON/TXT/SRT with GLOBAL timestamps. Uses *.diar.jsonl
+# (from `just diarize`) for speaker labels; else speaker=UNKNOWN.
+assemble stem *flags='':
+    uv run python scripts/assemble_transcript.py --stem "{{stem}}" {{flags}}
 
 # ─── Maintenance ──────────────────────────────────────────────────────────
 

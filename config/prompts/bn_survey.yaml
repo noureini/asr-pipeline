@@ -1,0 +1,53 @@
+# =============================================================================
+# Prompt templates — Bengali climate-disaster survey (IPA, coastal Bangladesh)
+# =============================================================================
+# These are OPERATIONAL CONFIG, not code: tune the dialect glossary, the
+# fusion rules, or the role definitions here WITHOUT editing Python.
+#
+# Placeholders use $name syntax (Python string.Template — so the literal
+# { } braces in the JSON examples need NO escaping):
+#   fusion_prompt : $literal    $fluent
+#   role_prompt   : $n          $body
+# =============================================================================
+
+# --- Stage 6b: two-witness fusion + translation (one Gemma call/segment) ---
+# Constraints are phrased as POSITIVE directives ("do Z"), not negations
+# ("never X"): negation is the instruction class LLMs follow least reliably,
+# and 4-bit quantization (Q4_K_XL GGUF) degrades instruction-following the
+# most — the two compound. The deterministic GER + foreign-script guards
+# still backstop the highest-stakes rules (numbers, script). KEEP THIS IN
+# SYNC with _FUSION_PROMPT in fusion.py (a unit test enforces byte-equality).
+# ONE negation is kept deliberately — "not a copy of either" — it is a
+# load-bearing anti-elaboration brake: positivizing it let Gemma confabulate
+# a fabricated sentence on a near-empty "okay okay" segment at temp=1.0.
+fusion_prompt: |
+  You reconstruct ONE utterance from a climate-disaster household survey in coastal Bangladesh. The speaker uses colloquial coastal Bengali (Barishal/Noakhali/Chittagong belt): expect ক→খ shifts and forms like হিয়া (=সেটা/ওটা). The inputs carry internal labels — treat them as scaffolding and output only the spoken words.
+
+  You get two noisy machine readings of the SAME audio, both ordinary Bengali text. Produce a better reconciliation, not a copy of either:
+  - LITERAL = a CTC transcriber: acoustically literal, weak language model, so it preserves how an unusual word actually SOUNDED rather than normalizing it. May be garbled or run-together where unsure. Trust it for names, numbers, rare/dialect words.
+  - FLUENT = a seq2seq transcriber: well-formed grammar and structure, but its strong language model can swap a content word for a plausible WRONG one. May list candidates (a)/(b)/(c); pick the one whose form best matches LITERAL given context.
+  Conflict rule (procedure, in order): (1) take FLUENT's sentence segmentation and clause boundaries as the skeleton — your [bn] must have sentence breaks even when LITERAL is one long unbroken run; (2) clause by clause, take the content word from LITERAL where the two differ — UNLESS the FLUENT candidates (a)/(b)/(c) agree with each other AND LITERAL is garbled/unintelligible at that span, in which case take the FLUENT consensus (several FLUENT readings agreeing outweigh a single garbled LITERAL); (3) keep FLUENT's structure while taking LITERAL's word choices where LITERAL is the clearer reading; keep every content word grounded in at least one witness.
+
+  DOMAIN PRIORS (household-roster + shocks instrument; prefer these when the reading is ambiguous):
+  - খানা = household (transcribe থানা-like sounds as খানা here); সদস্য = member; বর্গা/আধি = sharecropping; দিনমজুরি = daily wage; কৃষি/চাষ = farming
+  - shocks: বন্যা flood, ঘূর্ণিঝড় cyclone, জলোচ্ছ্বাস surge, লবণাক্ততা salinity, ফসল মার খাওয়া = crop destroyed
+  - in a date context, read বাইশ/তেইশ as a year (2022/23)
+
+  NAMES/PII: spoken personal names → [নাম]/[name]; place names verbatim if clear, else [স্থান]/[place]. For a garbled name, output the placeholder [নাম]/[name].
+
+  NUMBERS (critical, BOTH lines): render each number exactly as spoken, digit for digit; mark any number you cannot make out as [অস্পষ্ট]/[unclear]. Parse by structure: দেড়=1.5, আড়াই=2.5, সাড়ে X = X.5; -শো = ×100 (আড়াইশো=250); হাজার=×1000; লাখ=×100000.
+
+  SCRIPT: write every word in Bengali script, keeping only genuine English code-switches (NGO, loan, bank name) in Latin. If unsure whether a word is English, write it in Bengali. For an unclear Bengali word, keep it in Bengali script or mark [অস্পষ্ট].
+
+  Output a strippable <think> block (1–2 short sentences, no more), then exactly two lines:
+  <think> who is plausibly speaking + what's asked/answered; any content word you overrode and why — keep it to 1–2 short sentences </think>
+  [bn] clean coherent Bengali reconciling both readings; unrecoverable → [অস্পষ্ট]
+  [en] natural meaning-faithful English of YOUR [bn]; render it entirely in English, keeping only genuine code-switches (place/proper names); unrecoverable → [unclear]
+  On the [bn] and [en] lines, write ONLY the final reconciled text as plain prose; put any reasoning, arrows, or alternatives in the reasoning block above.
+
+  LITERAL: $literal
+  FLUENT (candidate readings): $fluent
+
+# NOTE: the former Stage-6c per-segment role_prompt was REMOVED. Roles now come
+# from the one-shot cluster→role LLM classifier (fusion._decide_roles) applied to
+# the speaker-pure Stage-5 segments — no per-segment role prompt is used.

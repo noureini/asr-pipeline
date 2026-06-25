@@ -57,8 +57,9 @@ PIPELINE_STAGES_BASE = [
     ("1", "Preprocessing", "Audio normalization, VAD-guided chunking"),
     ("2", "Language Detection", "Identifying languages and routing to engines"),
     ("3+4", "Transcription + Diarization", "ASR + speaker ID (parallel)"),
-    ("3b", "Forced Alignment", "Wav2vec2 word-level timestamp refinement"),
+    ("3b", "Word Timestamps", "titu native CTC word timestamps (forced alignment skipped)"),
     ("5", "Alignment", "Merging ASR segments with speaker labels"),
+    ("5b", "Raw Output", "Writing raw ASR+diarization transcript (pre-LLM)"),
 ]
 
 PIPELINE_STAGES_PP_TRANSLATEGEMMA = [
@@ -70,6 +71,25 @@ PIPELINE_STAGES_PP_CT2_NLLB = [
     ("6b", "Joint Refinement", "Ollama LLM: source + translation cross-reference"),
 ]
 
+PIPELINE_STAGES_PP_QWEN = [
+    ("6a", "Source Correction",
+     "Local LLM (GGUF): clean ASR errors in source language"),
+    ("6b", "Translation",
+     "Local LLM (GGUF): translate corrected text to English"),
+]
+
+PIPELINE_STAGES_PP_FUSION = [
+    ("6a", "Second Witness",
+     "Whisper-regional (CT2/faster-whisper) batched N-best per segment "
+     "(titu = witness #1)"),
+    ("6b", "Fusion + Translation",
+     "Gemma-3-12B reconciles both witnesses AND translates — one call, "
+     "fully local (greedy temp=0, repeat_penalty=1.0; GER + script guard)"),
+    ("6c", "Role Attribution",
+     "one-shot Gemma cluster→role on speaker-pure segments → "
+     "ENUMERATOR / RESPONDENT"),
+]
+
 PIPELINE_STAGES_OUTPUT = [
     ("7", "Output", "Formatting and writing transcript"),
 ]
@@ -78,8 +98,12 @@ PIPELINE_STAGES_OUTPUT = [
 def get_pipeline_stages(translation_backend: str = "translategemma") -> list[tuple[str, str, str]]:
     """Build the full pipeline stages list based on the active translation backend."""
     stages = list(PIPELINE_STAGES_BASE)
-    if translation_backend == "translategemma":
+    if translation_backend == "fusion":
+        stages.extend(PIPELINE_STAGES_PP_FUSION)
+    elif translation_backend == "translategemma":
         stages.extend(PIPELINE_STAGES_PP_TRANSLATEGEMMA)
+    elif translation_backend == "qwen":
+        stages.extend(PIPELINE_STAGES_PP_QWEN)
     else:
         stages.extend(PIPELINE_STAGES_PP_CT2_NLLB)
     stages.extend(PIPELINE_STAGES_OUTPUT)
@@ -138,6 +162,10 @@ def setup_logging(
 
     # Optional file handler
     if log_file:
+        # create the parent dir if needed — the output folder may not exist
+        # yet at logging-setup time (it's created later in the pipeline).
+        from pathlib import Path
+        Path(log_file).parent.mkdir(parents=True, exist_ok=True)
         file_handler = logging.FileHandler(log_file, mode="a", encoding="utf-8")
         file_handler.setFormatter(
             logging.Formatter(
