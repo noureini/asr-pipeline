@@ -262,13 +262,14 @@ Stage 6c Role Attribution   → cluster→role: SPEAKER_01 → ENUMERATOR, other
 Stage 7  Output             → transcript + review worklist + reasoning trace + raw dump
 ```
 
-**How the model reconciles one segment.** Take a real span where the two
-witnesses disagree. `titu` (acoustic) hears the river name but garbles the run;
-Whisper (fluent) smooths the grammar but swaps in the wrong river (চুরমা):
+**How the model reconciles one segment.** Take a span where the two witnesses
+disagree on a survey-critical word. `titu` (acoustic) preserves the colloquial
+word but garbles the run; Whisper (fluent) smooths the grammar but swaps in a
+plausible-but-wrong word — here খানা (household) → থানা (police station):
 
 ```
-LITERAL (titu)   : সুরমা নদীর পাড়োনা পশ্চিমে সুরমা নদী আচ্ছা হ্যাঁ এই সুরমা নদীর
-FLUENT (whisper) : (a) চুরমা নদীর পাড়ে পারখানা। ইটার এই পশ্চিমে দে অইলে ইটা চুরমা নদী।
+LITERAL (titu)   : খানায় ছয়জন সদস্য আছে আমরার ঘরে থাকে সবাই
+FLUENT (whisper) : (a) থানায় ছয় জন সদস্য আছে। সবাই আমাদের ঘরে থাকে।
                    (b) ...   (c) ...
 ```
 
@@ -278,11 +279,15 @@ in at least one witness. Its `<think>` trace (saved to `.reasoning.txt`) reasons
 explicitly about the conflict, then emits the two output lines:
 
 ```
-think: ...LITERAL's repeated "সুরমা নদী" and FLUENT's consistent "চুরমা নদী"
-       suggest a ক→খ-type error; "সুরমা" is the correct river name...
-[bn]   সুরমা নদীর পাড়ে পারখানা। ইটার এই পশ্চিমে দে অইলে ইটা সুরমা নদী।
-[en]   Our house is on the bank of the Surma River. If you go west from here, it's the Surma River.
+think: ...LITERAL's "খানা" vs FLUENT's "থানা" — in a household-roster survey
+       খানা (household) is intended, not থানা (police station); take LITERAL's
+       word, keep FLUENT's two-sentence structure; the number ছয়/6 agrees in
+       both witnesses, so copy it exactly...
+[bn]   খানায় ছয়জন সদস্য আছে। সবাই আমরার ঘরে থাকে।
+[en]   There are six members in the household. They all live in our house.
 ```
+
+*(Illustrative example — invented, not real interview data.)*
 
 **Then the guards run** (deterministically, on the produced lines):
 - the fused `[bn]` is compared against the witness pool — if it contained a
@@ -294,10 +299,10 @@ Anything flagged is written to `interview.review.txt` so a reviewer checks only
 those segments. The clean result lands in `interview.txt`:
 
 ```
-[00:03:27] RESPONDENT:
-[bn-raw] সুরমা নদীর পাড়োনা পশ্চিমে সুরমা নদী আচ্ছা হ্যাঁ এই সুরমা নদীর
-[bn] সুরমা নদীর পাড়ে পারখানা। ইটার এই পশ্চিমে দে অইলে ইটা সুরমা নদী।
-[en] Our house is on the bank of the Surma River. If you go west from here, it's the Surma River.
+[00:01:12] RESPONDENT:
+[bn-raw] খানায় ছয়জন সদস্য আছে আমরার ঘরে থাকে সবাই
+[bn] খানায় ছয়জন সদস্য আছে। সবাই আমরার ঘরে থাকে।
+[en] There are six members in the household. They all live in our house.
 ```
 
 That single segment shows the whole idea: **two imperfect witnesses, one local
@@ -311,7 +316,7 @@ engines, and the models auto-download from HuggingFace on the first run:
 
 | Component | Package / source | How it's obtained |
 |---|---|---|
-| Fusion LLM **engine** | `llama-cpp-python` (CUDA wheel) | `uv sync` pulls the prebuilt **cu124 GPU wheel** from the configured index — **no manual llama.cpp build** |
+| Fusion LLM **engine** | `llama-cpp-python` (CUDA wheel) | `uv sync` **automatically downloads** the prebuilt **cu124 GPU wheel** from the configured index — no manual download, and no compiling llama.cpp |
 | Fusion **model** | `gemma-3-12b-it-UD-Q4_K_XL.gguf` | auto-downloads from `unsloth/gemma-3-12b-it-GGUF` on first run (~7 GB) |
 | Witness #1 — titu | `nemo-toolkit[asr]` | model auto-downloads from HF |
 | Witness #2 — Whisper | `ctranslate2` + `faster-whisper` / `transformers` | model auto-downloads from HF |
@@ -489,7 +494,7 @@ settings live in `fusion_production.yaml`**. Key sections:
 | Setting | Value | Why |
 |---|---|---|
 | `temperature` | **0.0** | greedy — resists confabulation on near-empty segments (evidence-based) |
-| `repeat_penalty` | **1.0** | **must stay 1.0** — 1.1 drops repeated dialectal entities (e.g. সুরমা নদী) |
+| `repeat_penalty` | **1.0** | **must stay 1.0** — 1.1 drops legitimately repeated dialectal entities (repeated river/place names, months) |
 | `whisper_nbest` | 3 | second-witness hypotheses fed to fusion |
 | `n_ctx` / `flash_attn` / `kv_quant` | 2048 / true / true | the 8 GB-fit knobs |
 | `diarization.model` | `…community-1` | min 2 / max 4 speakers |
@@ -843,10 +848,10 @@ ASR Engines:    titu (FastConformer-CTC Bengali)
 Post-processed: Two-witness fusion + translation (titu ‖ Whisper → Gemma-3-12B)
 ========================================================================
 
-[00:03:27] RESPONDENT:
-[bn-raw] সুরমা নদীর পাড়োনা পশ্চিমে সুরমা নদী আচ্ছা হ্যাঁ এই সুরমা নদীর
-[bn] সুরমা নদীর পাড়ে পারখানা। ইটার এই পশ্চিমে দে অইলে ইটা সুরমা নদী।
-[en] Our house is on the bank of the Surma River. If you go west from here, it's the Surma River.
+[00:01:12] RESPONDENT:
+[bn-raw] খানায় ছয়জন সদস্য আছে আমরার ঘরে থাকে সবাই
+[bn] খানায় ছয়জন সদস্য আছে। সবাই আমরার ঘরে থাকে।
+[en] There are six members in the household. They all live in our house.
 
 ========================================================================
 END OF TRANSCRIPT
