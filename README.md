@@ -338,6 +338,13 @@ multilingual and is shared. Everything language-specific is one profile file:
 Digits need no setting: the number guard compares digits of any script by
 value (৬০ = ६० = 60).
 
+**Worked example:** [`languages/nep.yaml`](languages/nep.yaml) is a **draft**
+Nepali profile (AI Lab Nepal's code-mix IndicConformer, CTC head, plus their
+Whisper large-v3-turbo; CC BY-NC 4.0). Both witnesses are smoke-tested on
+FLEURS Nepali clips; its prompt
+([`config/prompts/ne_survey.yaml`](config/prompts/ne_survey.yaml)) still
+needs a native-speaker review, and it is not validated on survey audio.
+
 Steps, e.g. for Nepali (`nep`):
 
 1. `cp languages/_template.yaml languages/nep.yaml` and fill in the two
