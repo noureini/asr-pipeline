@@ -34,6 +34,10 @@ class CTCWitness(BaseModel):
     revision: Optional[str] = None          # pinned Hugging Face commit
     # nemo: checkpoint file in the repo (default "<repo-name>.nemo")
     nemo_file: Optional[str] = None
+    # nemo hybrid models (CTC + RNN-T/TDT heads): which decoder to use.
+    # "ctc" keeps the witness acoustically literal; RNN-T/TDT add an
+    # internal language model. None = the checkpoint's default decoder.
+    decoder: Optional[Literal["ctc", "rnnt"]] = None
     # hf: MMS-style adapter language (e.g. "npi"), None for plain models
     target_lang: Optional[str] = None
     batch_size: int = 8

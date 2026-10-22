@@ -39,6 +39,7 @@ class CTCEngine(BaseASREngine):
         backend: str = "nemo",
         revision: Optional[str] = None,
         nemo_file: Optional[str] = None,
+        decoder: Optional[str] = None,
         target_lang: Optional[str] = None,
         device: str = "cuda",
         batch_size: int = 8,
@@ -48,6 +49,7 @@ class CTCEngine(BaseASREngine):
         self._backend = backend
         self._revision = revision
         self._nemo_file = nemo_file
+        self._decoder = decoder               # hybrid nemo: "ctc" | "rnnt"
         self._target_lang = target_lang
         self._device = device
         self._batch_size = batch_size
@@ -105,6 +107,17 @@ class CTCEngine(BaseASREngine):
             self._model = nemo_asr.models.ASRModel.from_pretrained(
                 self._model_id
             )
+        if self._decoder:
+            # Hybrid checkpoints (e.g. IndicConformer: CTC + RNN-T heads)
+            # decode with RNN-T by default; the witness wants the CTC head.
+            if not hasattr(self._model, "change_decoding_strategy") or \
+                    not hasattr(self._model, "ctc_decoder"):
+                raise ValueError(
+                    f"{self._model_id} is not a hybrid CTC model; remove "
+                    f"'decoder: {self._decoder}' from the profile")
+            self._model.change_decoding_strategy(
+                decoder_type=self._decoder, verbose=False)
+            logger.info(f"  decoder: {self._decoder}")
         if self._use_cuda():
             import torch
             self._model = self._model.to(torch.device("cuda"))

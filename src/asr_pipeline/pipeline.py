@@ -578,6 +578,7 @@ class ASRPipeline:
                     backend=w.backend,
                     revision=w.revision,
                     nemo_file=w.nemo_file,
+                    decoder=w.decoder,
                     target_lang=w.target_lang,
                     device=self._config.pipeline.device,
                     batch_size=w.batch_size,

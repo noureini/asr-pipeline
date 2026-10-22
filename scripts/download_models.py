@@ -38,6 +38,8 @@ def main() -> int:
     ap.add_argument("-c", "--config", type=Path,
                     default=Path("fusion_production.yaml"),
                     help="shared config (judge model)")
+    ap.add_argument("--witnesses-only", action="store_true",
+                    help="skip the ~7 GB judge (e.g. to test a new profile)")
     args = ap.parse_args()
 
     profile = load_profile(args.language)
@@ -59,9 +61,13 @@ def main() -> int:
     whisper_dir = snapshot_download(wh.model, revision=wh.revision,
                                     allow_patterns=_HF_MODEL_FILES)
 
-    print(f"[3/4] judge    {fc.gguf_repo}/{fc.gguf_file} @ "
-          f"{fc.gguf_revision or 'latest'}  (~7 GB)")
-    hf_hub_download(fc.gguf_repo, fc.gguf_file, revision=fc.gguf_revision)
+    if args.witnesses_only:
+        print("[3/4] judge    skipped (--witnesses-only)")
+    else:
+        print(f"[3/4] judge    {fc.gguf_repo}/{fc.gguf_file} @ "
+              f"{fc.gguf_revision or 'latest'}  (~7 GB)")
+        hf_hub_download(fc.gguf_repo, fc.gguf_file,
+                        revision=fc.gguf_revision)
 
     if not wh.ct2_path:
         print("[4/4] CT2 copy skipped (witness_whisper.ct2_path is empty)")

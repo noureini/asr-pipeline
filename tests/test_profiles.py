@@ -119,3 +119,29 @@ def test_nemo_filename_defaults_to_repo_name():
     assert e.nemo_filename == "titu_stt_bn_fastconformer.nemo"
     e2 = CTCEngine(model_id="org/x", language="nep", nemo_file="y.nemo")
     assert e2.nemo_filename == "y.nemo"
+
+
+# ── Nepali draft profile ──────────────────────────────────────────────
+def test_nepali_profile_is_pinned_and_uses_ctc_head():
+    p = load_profile("nep")
+    assert p.tag == "ne" and p.scripts == ["DEVANAGARI", "LATIN"]
+    assert p.witness_ctc.backend == "nemo" and p.witness_ctc.decoder == "ctc"
+    assert p.witness_whisper.language == "ne"
+    for rev in (p.witness_ctc.revision, p.witness_whisper.revision):
+        assert rev and len(rev) == 40
+
+
+def test_nepali_prompt_is_consistent_with_profile():
+    from string import Template
+    import re
+    from asr_pipeline.fusion import _strip_think_instruction, load_prompts
+    p = load_profile("nep")
+    prompt = load_prompts(str(p.prompt_path))["fusion_prompt"]
+    assert "[ne]" in prompt and "[bn]" not in prompt
+    assert p.unclear_marker in prompt
+    # no Bengali-script leftovers from the template it was adapted from
+    assert not any("ঀ" <= ch <= "৿" for ch in prompt)
+    for text in (prompt, _strip_think_instruction(prompt)):
+        filled = Template(text).safe_substitute(literal="X", fluent="Y")
+        assert not re.findall(r"\$[a-zA-Z_]+", filled)
+    assert "<think>" not in _strip_think_instruction(prompt)

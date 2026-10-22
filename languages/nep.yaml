@@ -1,0 +1,52 @@
+# =============================================================================
+# Nepali — DRAFT profile (not yet validated on survey audio)
+# =============================================================================
+# Used by:  just setup-models nep  &&  just fusion interview.m4a nep
+# Shared settings (Gemma judge, VAD, decoding, guards): fusion_production.yaml
+#
+# Status: both witnesses were smoke-tested on a FLEURS Nepali test clip; the
+# judge prompt still needs a native-speaker review, and the whole pipeline
+# must be validated on 20-30 real interview segments before use.
+#
+# Both witnesses come from AI Lab Pvt. Ltd. (Nepal), fine-tuned on the same
+# ~130 h of Nepali–English code-mixed speech (read, lectures, podcasts, news,
+# conversation, interviews). Output: Nepali in Devanagari, English words in
+# lowercase Latin, no punctuation, numbers spelled as words.
+# Caveats:
+#   - License CC BY-NC 4.0 (non-commercial use only).
+#   - Same training data for both witnesses → their errors are less
+#     independent than titu vs Whisper. A/B alternative for witness 1: the
+#     original ai4bharat/indicconformer_stt_ne_hybrid_ctc_rnnt_large (MIT,
+#     gated, Devanagari-only vocabulary).
+#   - Trained on wideband audio, not 8 kHz phone recordings.
+# =============================================================================
+code: nep
+name: Nepali
+tag: ne                       # [ne] lines in the judge reply and transcript
+
+# Witness 1 · sound: IndicConformer (hybrid CTC + RNN-T) fine-tuned for
+# code-mixed Nepali. Decoded with its CTC head (acoustically literal):
+# model-card WER 21.8% with CTC vs 19.9% with RNN-T on their test set.
+witness_ctc:
+  backend: nemo
+  model: ailabpvtltd/indicconformer-nepali-english-codemix-asr
+  revision: d80adf63ca0562a5e2042f6bd4462fe0b68729a0
+  nemo_file: indicconformer-ne-en-codemix.nemo
+  decoder: ctc
+  batch_size: 8
+
+# Witness 2 · structure: Whisper large-v3-turbo fine-tuned on the same data.
+# Model-card WER 16.4% overall, 11.6% on interviews.
+witness_whisper:
+  model: ailabpvtltd/whisper-large-v3-turbo-nepali-english-codemix-asr
+  revision: 8eff5c489628694a9f3ff2a02f3225ccfd6c6046
+  language: ne
+  ct2_path: models/ailab_whisper_ne_ct2
+
+# Judge instructions — DRAFT, needs native-speaker review.
+prompt_file: config/prompts/ne_survey.yaml
+
+# Guards: Devanagari + Latin (genuine English code-switches) are allowed; any
+# other script in the output is a hallucination and is blanked.
+scripts: [DEVANAGARI, LATIN]
+unclear_marker: "[अस्पष्ट]"
