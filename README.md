@@ -107,7 +107,7 @@ practical for real interviews.
 | GPU | NVIDIA, **8 GB VRAM** | Validated on an RTX 2000 Ada (8 GB). A 16 GB card makes fusion much faster (batching) and allows Gemma-3-27B. |
 | NVIDIA driver | Supports **CUDA 12.8** | PyTorch is installed from the cu128 index. On WSL2, install the *Windows* NVIDIA driver; do **not** install a Linux driver inside WSL. |
 | RAM | 16 GB | |
-| Disk | ~25 GB free | ~10 GB models + ~12 GB Python environment |
+| Disk | ~30 GB free | ~10 GB models + ~15 GB Python environment |
 
 ### System tools
 
@@ -134,7 +134,7 @@ wsl --install -d Ubuntu-24.04
 Restart, open **Ubuntu** from the Start menu, and run everything below inside
 it. Keep the repository and your audio **in the Linux file system**
 (e.g. `~/asr-pipeline`), not under `/mnt/c/…`. Reading through `/mnt/c` is
-much slower, and a synced folder (OneDrive) would try to upload the 12 GB
+much slower, and a synced folder (OneDrive) would try to upload the 15 GB
 environment.
 
 Check the GPU is visible from Ubuntu:

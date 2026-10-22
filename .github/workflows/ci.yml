@@ -25,7 +25,7 @@ jobs:
         with:
           version: "0.12.22"
       - run: sudo apt-get update && sudo apt-get install -y ffmpeg
-      # The full locked environment is ~12 GB (CUDA torch, NeMo, llama.cpp).
+      # The full locked environment is ~15 GB (CUDA torch, NeMo, llama.cpp).
       # The unit tests only need this light subset, with CPU torch at the
       # same pinned version.
       - name: pytest
