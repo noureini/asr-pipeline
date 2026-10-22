@@ -18,7 +18,7 @@ All distances are over BENGALI GRAPHEME CLUSTERS (base char + its combining
 vowel signs / virama), not raw codepoints: char-level Levenshtein over Bengali
 over-penalises combining marks and makes the thresholds meaningless.
 
-Pure-python, no model, no extra deps — unit-tested in scripts/test_ger_guard.py.
+Pure-python, no model, no extra deps — unit-tested in tests/test_ger_guard.py.
 """
 from __future__ import annotations
 

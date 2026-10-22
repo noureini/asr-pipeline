@@ -275,9 +275,11 @@ class FusionTranslator:
         device: str = "cuda",
         whisper_model: str =
         "bengaliAI/tugstugi_bengaliai-regional-asr_whisper-medium",
+        whisper_revision: Optional[str] = None,
         whisper_ct2_path: str = "models/tugstugi_ct2",
         gguf_repo: str = "unsloth/gemma-3-12b-it-GGUF",
         gguf_file: str = "gemma-3-12b-it-UD-Q4_K_XL.gguf",
+        gguf_revision: Optional[str] = None,
         gguf_n_gpu_layers: int = -1,
         # 0 = OFF. Must stay 0 for the in-process gemma backend: prompt-lookup
         # speculative decoding crashes llama-cpp here ("could not broadcast
@@ -307,9 +309,11 @@ class FusionTranslator:
     ) -> None:
         self._device = device
         self._whisper_model = whisper_model
+        self._whisper_revision = whisper_revision
         self._whisper_ct2_path = whisper_ct2_path
         self._gguf_repo = gguf_repo
         self._gguf_file = gguf_file
+        self._gguf_revision = gguf_revision
         self._gguf_n_gpu_layers = gguf_n_gpu_layers
         self._prompt_lookup_tokens = prompt_lookup_tokens
         self._whisper_batch_size = whisper_batch_size
@@ -478,18 +482,20 @@ class FusionTranslator:
             logger.info("    GPU free: %.2f / %.2f GB",
                         free_b / 1e9, total_b / 1e9)
 
-        processor = AutoProcessor.from_pretrained(self._whisper_model)
+        processor = AutoProcessor.from_pretrained(
+            self._whisper_model, revision=self._whisper_revision)
         # SDPA attention (PyTorch-native flash-attention path): ~1.5-2x
         # faster + lower memory than eager, no flash-attn build needed.
         # The "insanely fast whisper" win that applies to our exact
         # regional model. Fall back to eager if unsupported.
         try:
             model = AutoModelForSpeechSeq2Seq.from_pretrained(
-                self._whisper_model, torch_dtype=dtype,
-                attn_implementation="sdpa")
+                self._whisper_model, revision=self._whisper_revision,
+                torch_dtype=dtype, attn_implementation="sdpa")
         except Exception:
             model = AutoModelForSpeechSeq2Seq.from_pretrained(
-                self._whisper_model, torch_dtype=dtype)
+                self._whisper_model, revision=self._whisper_revision,
+                torch_dtype=dtype)
         model.to(dev).eval()
 
         wav, sr = torchaudio.load(str(wav_path))
@@ -635,7 +641,8 @@ class FusionTranslator:
         tpl = Template(self._fusion_prompt)
         proc = GGUFProcessor(
             gguf_repo=self._gguf_repo, gguf_file=self._gguf_file,
-            n_ctx=self._n_ctx, n_gpu_layers=self._gguf_n_gpu_layers,
+            gguf_revision=self._gguf_revision, n_ctx=self._n_ctx,
+            n_gpu_layers=self._gguf_n_gpu_layers,
             prompt_lookup_tokens=self._prompt_lookup_tokens,
             flash_attn=self._flash_attn, kv_quant=self._kv_quant)
         if not proc.load():
@@ -727,6 +734,7 @@ class FusionTranslator:
             from huggingface_hub import hf_hub_download
             return hf_hub_download(repo_id=self._gguf_repo,
                                    filename=self._gguf_file,
+                                   revision=self._gguf_revision,
                                    local_files_only=True)
         except Exception:
             return None

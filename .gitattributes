@@ -1,0 +1,7 @@
+# Normalise line endings: LF in the repo and on Linux/WSL checkouts.
+* text=auto eol=lf
+
+*.pdf binary
+*.png binary
+*.wav binary
+*.m4a binary

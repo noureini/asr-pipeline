@@ -42,8 +42,10 @@ class TituEngine(BaseASREngine):
         device: str = "cuda",
         batch_size: int = 8,
         model_id: Optional[str] = None,
+        revision: Optional[str] = None,
     ) -> None:
         self._device = device
+        self._revision = revision
         self._batch_size = batch_size
         # fastconformer by default; conformer_large is a config A/B (see
         # TituConfig). Both are NeMo EncDecCTC models.
@@ -62,27 +64,29 @@ class TituEngine(BaseASREngine):
             f"  Loading titu [bold]{self._model_id}[/bold] "
             f"on {self._device}"
         )
-        # nemo_toolkit is a heavy dep with pinned torch versions; we
-        # defer the import and emit an actionable error if it's not
-        # installed. Run `uv pip install \"nemo_toolkit[asr]\"` in
-        # the project venv to enable titu.
+        # nemo_toolkit is heavy; import lazily so the rest of the CLI
+        # works without loading it.
         try:
             import nemo.collections.asr as nemo_asr
         except ModuleNotFoundError as e:
             raise ModuleNotFoundError(
-                "titu engine requires nemo_toolkit. Install it with:\n"
-                "  uv pip install \"nemo_toolkit[asr]\"\n"
-                "(this is a ~3 GB install — NeMo brings its own "
-                "torch + lightning pins). If you hit dependency "
-                "conflicts with pyannote/torchaudio, fall back to "
-                "running titu transcription via "
-                "scripts/titu_transcribe_chunks.py in an isolated "
-                "venv and feed the resulting *.chunks.jsonl into "
-                "the assembler instead."
+                "titu engine requires nemo_toolkit (a core dependency, "
+                "~3 GB). Re-sync the environment: uv sync"
             ) from e
-        self._model = nemo_asr.models.ASRModel.from_pretrained(
-            self._model_id
-        )
+        if self._revision:
+            # Pinned commit: fetch that exact .nemo checkpoint (cached,
+            # offline-safe once downloaded) and restore it.
+            from huggingface_hub import hf_hub_download
+            nemo_path = hf_hub_download(
+                repo_id=self._model_id,
+                filename=f"{self._model_id.split('/')[-1]}.nemo",
+                revision=self._revision,
+            )
+            self._model = nemo_asr.models.ASRModel.restore_from(nemo_path)
+        else:
+            self._model = nemo_asr.models.ASRModel.from_pretrained(
+                self._model_id
+            )
         if self._device == "cuda":
             import torch
             if torch.cuda.is_available():
