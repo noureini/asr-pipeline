@@ -4,7 +4,7 @@
 # Used by:  just setup-models nep  &&  just fusion interview.m4a nep
 # Shared settings (Gemma judge, VAD, decoding, guards): fusion_production.yaml
 #
-# Status: both witnesses were smoke-tested on a FLEURS Nepali test clip; the
+# Status: witnesses + Gemma judge run end to end on 3 FLEURS Nepali clips; the
 # judge prompt still needs a native-speaker review, and the whole pipeline
 # must be validated on 20-30 real interview segments before use.
 #

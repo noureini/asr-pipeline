@@ -9,6 +9,16 @@
 #   [ ] the placeholders [नाम] / [स्थान] / [अस्पष्ट]
 # Then validate on 20-30 real segments (see README, "Adding a language").
 #
+# Observed in the first judge run (3 FLEURS clips, read speech, Oct 2026):
+#   - [ne] kept spoken number words (अठार सय) while [en] gave "1800s":
+#     decide whether [ne] should use digits or words, and say so explicitly.
+#   - The conflict rule ("take LITERAL's content word") picked the CTC
+#     witness's wrong verb form (गर्नुभएको) over Whisper's correct one
+#     (गर्नुपरेको). These AI Lab witnesses differ less in kind than titu vs
+#     Whisper; A/B a softer rule on real interviews.
+#   - Language names were written in Devanagari (स्पेनिस, अंग्रेजी) despite
+#     the Latin code-switch rule; decide which loanwords count as English.
+#
 # Differences from the Bengali prompt, on purpose:
 #   - The AI Lab witnesses output NO punctuation and spell numbers as words,
 #     so sentence breaks come from the judge, not from FLUENT.
