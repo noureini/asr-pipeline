@@ -22,9 +22,10 @@ built-in QA*).
 6. [Reproducibility](#reproducibility)
 7. [Dependencies and why each is needed](#dependencies-and-why-each-is-needed)
 8. [Configuration](#configuration)
-9. [Other languages (general path)](#other-languages-general-path)
-10. [Repository layout](#repository-layout)
-11. [Troubleshooting](#troubleshooting)
+9. [Adding a language](#adding-a-language)
+10. [Other languages without a profile (general path)](#other-languages-without-a-profile-general-path)
+11. [Repository layout](#repository-layout)
+12. [Troubleshooting](#troubleshooting)
 
 ---
 
@@ -47,7 +48,7 @@ flowchart LR
 |---|---|---|
 | **0 · Check** | Each recording is scored 0–100 (SNR, clipping, silence) and flagged EXCELLENT … BROKEN in one Excel report. Broken files are caught before any GPU time is spent. No GPU or token needed. | `scripts/audio_quality_report.py` |
 | **1 · Preprocess** | Resample to 16 kHz mono (soxr), Silero VAD finds speech, speech is cut into chunks of ≤ 15 s with 2 s overlap. | `preprocessor.py` |
-| **2a · Witness 1: sound** | **titu** FastConformer-CTC transcribes each chunk *acoustically*: faithful to how names, numbers and dialect words sounded; emits word timestamps. | `engines/titu_engine.py` |
+| **2a · Witness 1: sound** | **titu** FastConformer-CTC transcribes each chunk *acoustically*: faithful to how names, numbers and dialect words sounded; emits word timestamps. | `engines/ctc_engine.py`, `languages/ben.yaml` |
 | **2b · Witness 2: structure** | **Regional Whisper-medium** transcribes the same chunk *fluently*, returning **3 readings (N-best)** via seeded sampling so the judge sees where it is unsure (*ward* vs *world*). | `fusion.py` |
 | **3 · Reconcile** | **Gemma-3-12B** (4-bit, local, temperature 0) reads both witnesses and, in **one call** per segment: reconciles them into one Bengali line, translates it to English, and labels each turn **ENUMERATOR / RESPONDENT** *from what is said*. A segment holding a question *and* its answer is split into two turns. Its reasoning is kept for audit. | `fusion.py`, `config/prompts/bn_survey.yaml` |
 | **4 · Guard** | Plain rules, no AI: a number **neither witness heard** → `[unclear]`; text in a **foreign script** (Cyrillic, Devanagari…) → blanked; output that **drifts from both witnesses** → flagged. | `ger_guard.py` |
@@ -164,8 +165,9 @@ just setup
 
 - `uv sync --frozen` installs the **exact** package versions in `uv.lock`
   (including the CUDA builds of torch and llama-cpp-python).
-- `scripts/download_models.py` downloads titu, regional Whisper and Gemma at
-  the **pinned commits** in `fusion_production.yaml` (~10 GB, one time) and
+- `scripts/download_models.py` downloads the Bengali witnesses (titu,
+  regional Whisper) and the Gemma judge at the **pinned commits** in
+  `languages/ben.yaml` and `fusion_production.yaml` (~10 GB, one time), and
   builds the faster CTranslate2 copy of Whisper in `models/`.
 
 **4. Verify:**
@@ -189,12 +191,18 @@ cp .env.example .env    # then set HF_TOKEN=hf_...
 # Step 0 · audio quality report for a folder (no GPU) → quality_report.xlsx
 just quality ./interviews
 
-# Steps 1-4 · one interview
-just fusion interview.m4a -o ./outputs
+# Steps 1-4 · one interview (language defaults to ben = Bengali)
+just fusion interview.m4a
+
+# …with options: give the language first, then the options
+just fusion interview.m4a ben -o ./outputs
 
 # …a whole Survey Solutions export (resume-safe: re-run to continue)
-just fusion-folder ./interviews -o ./outputs
+just fusion-folder ./interviews ben -o ./outputs
 ```
+
+The second argument is the language profile (`languages/<code>.yaml`); see
+[Adding a language](#adding-a-language).
 
 `just fusion-folder` expects the Survey Solutions layout, and merges each
 interview's files into one transcript with absolute timestamps:
@@ -234,8 +242,9 @@ Everything that affects the output is pinned:
 | Prompts | `config/prompts/bn_survey.yaml`; a unit test keeps it identical to the in-code copy |
 | Line endings | `.gitattributes` forces LF |
 
-Model revisions are full commit hashes in `fusion_production.yaml`
-(`titu.revision`, `fusion.whisper_revision`, `fusion.gguf_revision`). After
+Model revisions are full commit hashes: the witnesses in the language profile
+(`languages/ben.yaml`: `witness_ctc.revision`, `witness_whisper.revision`),
+the judge in `fusion_production.yaml` (`fusion.gguf_revision`). After
 `just setup-models`, runs are fully offline: the `fusion` recipes set
 `HF_HUB_OFFLINE=1`. Re-running the same audio with the same config gives the
 same transcript on the same hardware. GPU kernels can differ slightly across
@@ -282,16 +291,22 @@ and run `uv lock`), run `just test`, and commit both `pyproject.toml` and
 
 ## Configuration
 
-The Bengali pipeline is defined by [`fusion_production.yaml`](fusion_production.yaml),
-layered on the bundled defaults in
-[`src/asr_pipeline/default.yaml`](src/asr_pipeline/default.yaml). The settings
-that matter most:
+Configuration is split in two:
+
+- **What is shared** (VAD, the Gemma judge, decoding, guard thresholds):
+  [`fusion_production.yaml`](fusion_production.yaml), layered on the bundled
+  defaults in [`src/asr_pipeline/default.yaml`](src/asr_pipeline/default.yaml).
+- **What is language-specific** (the two witness models, the judge prompt,
+  the allowed scripts, the "unclear" marker): one profile per language in
+  [`languages/`](languages/), selected with `-l` (Bengali:
+  [`languages/ben.yaml`](languages/ben.yaml)).
+
+The shared settings that matter most:
 
 | Setting | Value | Why |
 |---|---|---|
-| `pipeline.force_engine` | `titu` | Witness 1 for Bengali |
 | `diarization.enabled` | `false` | Roles come from the LLM, not voice clustering |
-| `alignment.enabled` | `false` | titu's own CTC word timestamps are used directly |
+| `alignment.enabled` | `false` | The CTC witness's own word timestamps are used directly |
 | `fusion.whisper_nbest` | `3` | Three Whisper readings for the judge |
 | `fusion.temperature` | `0.0` | Greedy: on near-empty segments sampling invented survey answers |
 | `fusion.repeat_penalty` | `1.0` | The llama.cpp default 1.1 drops legitimate repetition in dialect speech |
@@ -300,18 +315,52 @@ that matter most:
 | `fusion.ger_snap` | `false` | Snap-to-witness stays off until calibrated (`just calibrate-ger name.reasoning.txt`) |
 
 **Prompt.** The judge's instructions (dialect glossary, domain priors, number
-rules, role definitions) live in
+rules, role definitions) live in the file the profile names; for Bengali
 [`config/prompts/bn_survey.yaml`](config/prompts/bn_survey.yaml). Edit the
-YAML, not the code. Keep the in-code copy in `fusion.py` in sync; `just test`
-fails if they drift.
+YAML, not the code. The Bengali prompt also has an in-code copy in
+`fusion.py`; `just test` fails if they drift.
 
-**Adapting to another language or survey:** copy `fusion_production.yaml`,
-swap the two witnesses for a phonetic (CTC) and a fluent (Whisper-style) model
-for your language, and adapt the prompt's glossary and priors. Keep the
-number-abstain guard. Validate on 20–30 segments with a native speaker before
-scaling.
+## Adding a language
 
-## Other languages (general path)
+The two-witness design works for any language that has both a CTC model (the
+"sound" witness) and a Whisper fine-tune (the "structure" witness). Gemma is
+multilingual and is shared. Everything language-specific is one profile file:
+
+| Profile field | What it sets | Bengali |
+|---|---|---|
+| `witness_ctc` | Witness 1: `backend` (`nemo` for a `.nemo` repo, `hf` for a wav2vec2 / XLS-R / MMS CTC model), `model`, `revision`, `target_lang` (MMS adapters) | `nemo`, `hishab/titu_stt_bn_fastconformer` |
+| `witness_whisper` | Witness 2: `model`, `revision`, Whisper `language` code, `ct2_path` | `bengaliAI/tugstugi_…_whisper-medium`, `bn` |
+| `prompt_file` | Judge prompt: glossary, survey priors, number words, roles | `config/prompts/bn_survey.yaml` |
+| `tag` | Line tag in the judge reply and transcript (`[bn]`, `[ne]` …) | `bn` |
+| `scripts` | Unicode scripts allowed in the output; anything else is blanked | `[BENGALI, LATIN]` |
+| `unclear_marker` | Written for unintelligible spans and fabricated numbers | `[অস্পষ্ট]` |
+
+Digits need no setting: the number guard compares digits of any script by
+value (৬০ = ६० = 60).
+
+**Worked example:** [`languages/nep.yaml`](languages/nep.yaml) is a **draft**
+Nepali profile (AI Lab Nepal's code-mix IndicConformer, CTC head, plus their
+Whisper large-v3-turbo; CC BY-NC 4.0). Both witnesses are smoke-tested on
+FLEURS Nepali clips; its prompt
+([`config/prompts/ne_survey.yaml`](config/prompts/ne_survey.yaml)) still
+needs a native-speaker review, and it is not validated on survey audio.
+
+Steps, e.g. for Nepali (`nep`):
+
+1. `cp languages/_template.yaml languages/nep.yaml` and fill in the two
+   witness models. For the CTC witness, a dedicated Nepali CTC model is best;
+   Meta's MMS (`facebook/mms-1b-all`, `backend: hf`, `target_lang: npi`)
+   covers Nepali as a fallback.
+2. Copy `config/prompts/bn_survey.yaml` to `config/prompts/ne_survey.yaml`.
+   Keep the structure, the role rules and the output format. Replace the
+   dialect glossary, domain priors and number words, write `[ne]` for the
+   native line and the Nepali unclear marker. Keep the number rules.
+3. `just setup-models nep`, then pin the revisions you validated (full
+   commit hashes) in the profile.
+4. `just fusion interview.m4a nep`
+5. Validate on 20–30 segments with a native speaker before scaling.
+
+## Other languages without a profile (general path)
 
 For languages other than Bengali, the pipeline uses a single ASR engine
 (Whisper large-v3 for high-resource languages, Omnilingual ASR for 1,600+
@@ -331,13 +380,15 @@ uv run --frozen --extra multilingual asr-pipeline list-languages
 ## Repository layout
 
 ```
-fusion_production.yaml     Bengali production config (pinned models)
+fusion_production.yaml     Shared production config (judge, VAD, decoding, guards)
+languages/                 One profile per language: witnesses, prompt, scripts
 config/prompts/            Judge prompt (editable YAML)
 src/asr_pipeline/
   cli.py                   `asr-pipeline` command line
   pipeline.py              Orchestration (Steps 1-4, outputs, worklist)
   preprocessor.py          Resampling, VAD, chunking
-  engines/                 titu, Whisper, Omnilingual
+  profiles.py              Language profile schema + loader
+  engines/                 CTC witness (NeMo / HF), Whisper, Omnilingual
   fusion.py                Whisper witness, Gemma judge, role-labelled turns
   ger_guard.py             Deterministic guards
   postprocessor.py         GGUF loader; general-path translation backends

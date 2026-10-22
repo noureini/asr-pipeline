@@ -1,0 +1,39 @@
+# =============================================================================
+# Template — copy to languages/<code>.yaml (ISO 639-3, e.g. nep.yaml)
+# =============================================================================
+# Then:
+#   just setup-models <code>        # download + pin the two witnesses
+#   just fusion interview.m4a <code>
+# Validate on 20-30 segments with a native speaker before scaling.
+# =============================================================================
+code: xxx                      # must match the file name and `-l`
+name: Language name
+tag: xx                        # short tag for [xx] lines (usually ISO 639-1)
+
+# Witness 1 · sound — a CTC model (acoustically literal, word timestamps).
+#   backend: nemo → a NeMo ASR repo with a .nemo checkpoint
+#   backend: hf   → a Hugging Face CTC model (wav2vec2 / MMS / XLS-R)
+#   For Meta MMS (facebook/mms-1b-all) set target_lang to the adapter code.
+witness_ctc:
+  backend: hf
+  model: org/ctc-model
+  revision: null               # set to the commit hash you validated
+  target_lang: null
+  batch_size: 8
+
+# Witness 2 · structure — a Whisper fine-tune for the language (fluent).
+witness_whisper:
+  model: org/whisper-finetune
+  revision: null               # set to the commit hash you validated
+  language: xx                 # Whisper language code
+  ct2_path: models/<name>_ct2  # faster CT2 copy, built by setup-models; "" = off
+
+# Judge instructions. Start from config/prompts/bn_survey.yaml: keep the
+# structure, roles, number and output rules; replace the dialect glossary,
+# domain priors and number words; use the [xx] tag and unclear marker below.
+prompt_file: config/prompts/xxx_survey.yaml
+
+# Unicode scripts allowed in the transcript (first word of the character
+# name: DEVANAGARI, BENGALI, ARABIC, LATIN …). Others are blanked.
+scripts: [LATIN]
+unclear_marker: "[unclear]"    # native-language "unclear" marker
