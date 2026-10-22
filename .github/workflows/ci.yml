@@ -1,0 +1,41 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  lockfile:
+    name: uv.lock matches pyproject.toml
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v6
+        with:
+          version: "0.12.22"
+      - run: uv lock --check
+
+  tests:
+    name: Unit tests (CPU, no models)
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v6
+        with:
+          version: "0.12.22"
+      - run: sudo apt-get update && sudo apt-get install -y ffmpeg
+      # The full locked environment is ~15 GB (CUDA torch, NeMo, llama.cpp).
+      # The unit tests only need this light subset, with CPU torch at the
+      # same pinned version.
+      - name: pytest
+        env:
+          PYTHONPATH: src
+        run: >
+          uv run --no-project --python 3.12
+          --index https://download.pytorch.org/whl/cpu
+          --index-strategy unsafe-best-match
+          --with pytest --with pyyaml --with pydantic --with numpy
+          --with soundfile --with rich
+          --with torch==2.8.0 --with torchaudio==2.8.0
+          pytest -q

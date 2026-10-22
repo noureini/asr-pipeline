@@ -263,14 +263,11 @@ class AudioPreprocessor:
     # ─────────────────────────────────────────────────────────────────
 
     def _get_vad_model(self) -> torch.nn.Module:
-        """Lazily load Silero VAD model."""
+        """Lazily load Silero VAD from the installed (version-locked)
+        silero-vad package — bundled weights, no network fetch."""
         if self._vad_model is None:
-            model, _ = torch.hub.load(
-                repo_or_dir="snakers4/silero-vad",
-                model="silero_vad",
-                trust_repo=True,
-            )
-            self._vad_model = model
+            from silero_vad import load_silero_vad
+            self._vad_model = load_silero_vad()
         return self._vad_model
 
     def _detect_speech(

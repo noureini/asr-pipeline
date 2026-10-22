@@ -5,9 +5,8 @@ These are cheap and catch regressions that already bit once:
   2. the <think> reasoning block breaking [bn]/[en] extraction, or a
      skipped/unclosed block silently dropping a segment.
 
-(The per-segment role-attribution stage — SegmentRoles / _apply_role_turns /
-role_prompt — was removed; roles now come from the one-shot cluster→role
-classifier on speaker-pure segments, so those tests are gone.)
+Speaker roles come from the fusion call itself: each turn is tagged
+@ENUMERATOR / @RESPONDENT, and a question+answer segment is split.
 """
 import re
 from string import Template
@@ -65,8 +64,7 @@ def test_parse_single_untagged_turn():
 
 
 def test_parse_two_role_turns():
-    """_parse_fusion still supports @ROLE-tagged turns (defensive), even
-    though the current prompt emits a single untagged turn."""
+    """A question+answer segment comes back as two @ROLE-tagged turns."""
     out = ("<think> enumerator asks how they classify it, respondent says "
            "flood </think>\n"
            "@ENUMERATOR\n[bn] এই ঘটনাটাকে কী বলেন?\n[en] What do you call "
@@ -146,3 +144,59 @@ def test_fusion_think_off_keeps_domain_content():
     for must in ("খানা = household", "আড়াইশো=250", "Conflict rule",
                  "LITERAL", "FLUENT"):
         assert must in off
+
+
+# ── per-turn roles (no diarization) + GER on split turns ──────────────
+from asr_pipeline.fusion import FusionTranslator  # noqa: E402
+from asr_pipeline.models import AlignedSegment  # noqa: E402
+
+
+def _seg(i, start, end, text):
+    return AlignedSegment(segment_id=i, start_s=start, end_s=end,
+                          speaker_id="SPEAKER_00", language="ben",
+                          raw_text=text)
+
+
+def _run_with_replies(replies, aligned, nbest):
+    """Drive FusionTranslator.process with canned Gemma replies (no models)."""
+    ft = FusionTranslator(prompts_file=PROMPTS_FILE)
+    ft._run_whisper = lambda a, w: nbest
+
+    def fake_fusion(a, titu, wn):
+        for i, ans in enumerate(replies):
+            ft._finish_segment(i, ans, {}, titu[i], wn[i])
+        return [""] * len(a), [""] * len(a)
+    ft._run_fusion = fake_fusion
+    return ft.process(aligned, wav_path=None)
+
+
+def test_roles_come_from_fusion_turns_and_split_question_answer():
+    aligned = [_seg(0, 0.0, 10.0, "আপনার খানায় কতজন সদস্য আমার খানায় ছয়জন"),
+               _seg(1, 10.0, 14.0, "হ্যাঁ")]
+    nbest = [["আপনার খানায় কতজন সদস্য? আমার খানায় ছয়জন।"], ["হ্যাঁ।"]]
+    replies = [
+        "<think> enumerator asks, respondent answers </think>\n"
+        "@ENUMERATOR\n[bn] আপনার খানায় কতজন সদস্য?\n"
+        "[en] How many members in your household?\n"
+        "@RESPONDENT\n[bn] আমার খানায় ছয়জন।\n[en] Six in my household.",
+        "<think> short reply </think>\n[bn] হ্যাঁ।\n[en] Yes.",  # untagged
+    ]
+    out = _run_with_replies(replies, aligned, nbest)
+    assert [s.speaker_id for s in out] == [
+        "ENUMERATOR", "RESPONDENT", "RESPONDENT"]   # untagged → continues
+    assert out[0].start_s == 0.0 and out[1].end_s == 10.0
+    assert out[0].end_s == out[1].start_s          # contiguous split
+    assert "split-turn" in out[0].review_reason
+
+
+def test_ger_blanks_fabricated_number_per_turn_and_keeps_split():
+    ft = FusionTranslator(prompts_file=PROMPTS_FILE)
+    turns = [("ENUMERATOR", "বয়স কত?", "How old?"),
+             ("RESPONDENT", "আমার বয়স ৬০", "I am 60")]
+    titu, whyps = "বয়স কত আমার বয়স ৬", ["বয়স কত? আমার বয়স ৬।"]
+    out = ft._apply_ger(0, turns, titu, whyps)
+    assert [t[0] for t in out] == ["ENUMERATOR", "RESPONDENT"]
+    assert out[0] == turns[0]
+    assert "৬০" not in out[1][1] and "[অস্পষ্ট]" in out[1][1]
+    assert "60" not in out[1][2] and "[unclear]" in out[1][2]
+    assert any(r.startswith("number-abstain") for r in ft._ger_reasons[0])

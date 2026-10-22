@@ -32,7 +32,7 @@ _DEFAULT_CONFIG = Path(__file__).parent / "default.yaml"
 # "tito" instead of "titu" — fails LOUDLY at startup rather than silently
 # mis-routing the survey to the wrong (or no) model. Keep in sync with the
 # engine factory (engines/__init__.py create_engine).
-ASREngine = Literal["whisper", "titu", "qwen", "omnilingual", "indic_conformer"]
+ASREngine = Literal["whisper", "titu", "omnilingual"]
 VALID_ASR_ENGINES = frozenset(get_args(ASREngine))
 
 
@@ -55,9 +55,6 @@ class PipelineConfig(BaseModel):
     # an unknown value raises immediately instead of mis-routing silently.
     # null = use default routing (non-high -> omnilingual).
     force_engine: Optional[ASREngine] = None
-    # IndicConformer decoder strategy when force_engine="indic_conformer".
-    # "rnnt" = more accurate on conjuncts/boundaries; "ctc" = faster.
-    indic_conformer_decoder: str = "rnnt"
 
 
 class LoudnessConfig(BaseModel):
@@ -146,30 +143,17 @@ class TituConfig(BaseModel):
     non-telephony, 128-token near-character tokenizer) captures more dialect +
     content (incl. survey-critical flood months) but correlates with Whisper and
     emits phonetic non-standard spelling — kept as a one-line A/B switch.
-    Compare with scripts/ab_titu_variants.py. Literal-validated so a typo fails
+    Compare variants on the archive/experiments branch
+    (scripts/ab_titu_variants.py). Literal-validated so a typo fails
     at config load.
     """
     model_id: Literal[
         "hishab/titu_stt_bn_fastconformer",
         "hishab/titu_stt_bn_conformer_large",
     ] = "hishab/titu_stt_bn_fastconformer"
+    # Hugging Face commit to load (reproducibility). None = latest.
+    revision: Optional[str] = None
     batch_size: int = 8
-
-
-class QwenConfig(BaseModel):
-    """Qwen3-ASR engine — default ASR for non-high-resource languages.
-
-    Bengali is not in Qwen3-ASR's official language list but the model
-    produces usable Bengali (validated ~8.5% CER on FLEURS). `language`
-    is the optional Qwen language hint ("Bengali", "English", ...);
-    None = auto-detect (the validated mode).
-    """
-
-    model: str = "Qwen/Qwen3-ASR-1.7B"
-    language: Optional[str] = None       # None = auto-detect
-    dtype: str = "bfloat16"              # bfloat16 | float16 | float32
-    device_map: str = "cuda:0"           # "cpu" for CPU-only boxes
-    max_audio_length_s: int = 30
 
 
 class NemoMsddConfig(BaseModel):
@@ -183,6 +167,9 @@ class NemoMsddConfig(BaseModel):
 
 
 class DiarizationConfig(BaseModel):
+    # Voice diarization (speaker clusters). The Bengali fusion path turns it
+    # OFF: the fusion LLM labels ENUMERATOR / RESPONDENT from what is said.
+    enabled: bool = True
     backend: Literal["pyannote", "nemo_msdd"] = "pyannote"
     # community-1 (2025) is the actively-maintained pyannote pipeline: exclusive
     # frame-level diarization + stronger on noisy/multi-speaker audio. Ties 3.1
@@ -303,6 +290,9 @@ class FusionConfig(BaseModel):
 
     whisper_model: str = (
         "bengaliAI/tugstugi_bengaliai-regional-asr_whisper-medium")
+    # Hugging Face commits to load (reproducibility). None = latest.
+    whisper_revision: Optional[str] = None
+    gguf_revision: Optional[str] = None
     # Local CT2/faster-whisper conversion of whisper_model. Enables batched
     # N-best ~1.9x faster than HF transformers (A/B-validated 2026-06-25).
     # Missing path / "" → automatic fallback to the HF transformers backend.
@@ -383,10 +373,8 @@ class FusionConfig(BaseModel):
     # clobbers good reconciliations. (Number-abstain + flags work regardless.)
     ger_snap: bool = False
     ger_snap_tau: float = 0.72      # CALIBRATE from your slice before trusting
-    # Roles (ENUMERATOR / RESPONDENT) now come from Stage-5 word-level
-    # speaker attribution (titu CTC word timestamps → speaker-pure segments
-    # → one-time cluster→role mapping in alignment.map_speakers_to_roles).
-    # The old per-segment LLM role-attribution stage has been removed.
+    # Roles (ENUMERATOR / RESPONDENT) are labelled per turn inside the
+    # fusion call, from what is said (no diarization on this path).
     # ── Prompt templates (operational config, not code) ───────────────
     # Path (relative to repo root or absolute) to the YAML holding
     # `fusion_prompt`. Built-in default is used if the file is missing,
@@ -441,7 +429,6 @@ class AppConfig(BaseModel):
     languages: dict[str, LanguageConfig] = Field(default_factory=dict)
     whisper: WhisperConfig = Field(default_factory=WhisperConfig)
     omnilingual: OmnilingualConfig = Field(default_factory=OmnilingualConfig)
-    qwen: QwenConfig = Field(default_factory=QwenConfig)
     titu: TituConfig = Field(default_factory=TituConfig)
     diarization: DiarizationConfig = Field(default_factory=DiarizationConfig)
     alignment: AlignmentConfig = Field(default_factory=AlignmentConfig)
@@ -467,8 +454,8 @@ class AppConfig(BaseModel):
 
         Priority:
           1. High-resource → Whisper
-          2. Otherwise → Qwen3-ASR (default; Omnilingual remains
-             available via explicit config/override)
+          2. pipeline.force_engine, if set (Bengali fusion: titu)
+          3. Otherwise → Omnilingual
         """
         lang = self.get_language(code)
         if lang.tier == LanguageTier.HIGH:
@@ -477,9 +464,7 @@ class AppConfig(BaseModel):
             return self.pipeline.force_engine
         # Default for non-high-resource: Omnilingual. Measured ~6.8% CER
         # (num-normalized) on FLEURS Bengali, fully local/private —
-        # vs Qwen3-ASR-1.7B's 34% (no Bengali) and Qwen-Flash being
-        # cloud-only (unusable for survey PII). Override with
-        # pipeline.force_engine for A/B testing.
+        # Override with pipeline.force_engine.
         return "omnilingual"
 
 

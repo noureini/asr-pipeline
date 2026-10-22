@@ -281,27 +281,10 @@ titu:
   # Grounding CTC witness. fastconformer is the validated default (standard
   # orthography → complements dialectal Whisper in fusion; clean for number
   # detection). Swap to conformer_large to A/B (more dialect/content, incl.
-  # flood months, but correlates with Whisper). See scripts/ab_titu_variants.py.
+  # flood months, but correlates with Whisper). See the archive/experiments branch (scripts/ab_titu_variants.py).
   model_id: "hishab/titu_stt_bn_fastconformer"
   # model_id: "hishab/titu_stt_bn_conformer_large"
   batch_size: 8
-
-# ---------------------------------------------------------------------------
-# Qwen3-ASR engine — OPT-IN ONLY (not the default)
-# ---------------------------------------------------------------------------
-# NOT the production default. Qwen3-ASR-1.7B (local, open weights) does
-# NOT support Bengali — it transcribes Bengali audio as Hindi/Devanagari
-# (~34% CER). The good Bengali Qwen-ASR is Qwen3-ASR-Flash, which is
-# DashScope cloud-API only (no weights) and therefore unusable for
-# survey PII. Omnilingual is the production default (see config.py
-# engine_for_language; ~6.8% CER local on FLEURS Bengali). This section
-# is kept for the research/FLEURS track and engine A/B via force_engine.
-qwen:
-  model: "Qwen/Qwen3-ASR-1.7B"
-  language: "Bengali"                # hint; 1.7B still lacks real Bengali
-  dtype: "bfloat16"                  # bfloat16 | float16 | float32
-  device_map: "cuda:0"               # "cpu" for CPU-only boxes
-  max_audio_length_s: 30             # per-chunk limit
 
 # ---------------------------------------------------------------------------
 # Speaker diarization

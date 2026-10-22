@@ -26,9 +26,7 @@ from asr_pipeline.alignment import align_segments, merge_consecutive_segments
 from asr_pipeline.config import VALID_ASR_ENGINES, AppConfig
 from asr_pipeline.diarization import SpeakerDiarizer, create_diarizer
 from asr_pipeline.engines.omnilingual_engine import OmnilingualEngine
-from asr_pipeline.engines.qwen_engine import QwenEngine
 from asr_pipeline.engines.titu_engine import TituEngine
-from asr_pipeline.engines.indic_conformer_engine import IndicConformerEngine
 from asr_pipeline.engines.whisper_engine import WhisperEngine
 from asr_pipeline.forced_aligner import ForcedAligner
 from asr_pipeline.formatter import write_transcript
@@ -47,6 +45,7 @@ from asr_pipeline.models import (
     ASRSegment,
     AudioChunk,
     AudioQualityMetrics,
+    DiarizationResult,
     LanguageTier,
     NonSpeechSegment,
     ProcessedSegment,
@@ -108,9 +107,7 @@ class ASRPipeline:
         self._preprocessor: Optional[AudioPreprocessor] = None
         self._whisper: Optional[WhisperEngine] = None
         self._omnilingual: Optional[OmnilingualEngine] = None
-        self._qwen: Optional[QwenEngine] = None
         self._titu: Optional[TituEngine] = None
-        self._indic_conformer: Optional[IndicConformerEngine] = None
         self._diarizer: Optional[SpeakerDiarizer] = None
         self._aligner: Optional[ForcedAligner] = None
         self._postprocessor: Optional[PostProcessor] = None
@@ -204,15 +201,15 @@ class ASRPipeline:
                     asr_segments = self._dedup_overlap_words(asr_segments)
 
                 # ── Stage 5: Alignment ───────────────────────────
-                # Word-level speaker attribution → speaker-pure segments
-                # (still labelled by diarization cluster SPEAKER_xx). The
-                # cluster→role decision (ENUMERATOR / RESPONDENT) is made
-                # once inside the fusion stage by an LLM classifier, where
-                # Gemma is already loaded — so the raw transcript shows the
-                # honest pre-LLM clusters.
-                with stage_log("5", "Alignment", "Word-level speaker attribution"):
+                # With diarization: word-level speaker attribution →
+                # speaker-pure segments (SPEAKER_xx). Without it (Bengali
+                # fusion): one segment per VAD chunk, NOT merged — the fusion
+                # LLM labels each turn ENUMERATOR / RESPONDENT, so the raw
+                # transcript carries no speaker labels yet.
+                with stage_log("5", "Alignment", "Segments for post-processing"):
                     aligned = align_segments(asr_segments, diarization_result)
-                    aligned = merge_consecutive_segments(aligned)
+                    if self._config.diarization.enabled:
+                        aligned = merge_consecutive_segments(aligned)
 
                 # ── Stage 5b: Raw transcript snapshot ──────────
                 # Save a transcript built ONLY from titu + diarization
@@ -265,9 +262,14 @@ class ASRPipeline:
 
                 # ── Stage 7: Output ──────────────────────────────
                 with stage_log("7", "Output", "Formatting and writing transcript"):
+                    num_speakers = (
+                        diarization_result.num_speakers
+                        if self._config.diarization.enabled
+                        else len({s.speaker_id for s in processed})
+                    )
                     result = self._build_result(
                         audio_path, language, engine_name, processed,
-                        diarization_result.num_speakers, project_name,
+                        num_speakers, project_name,
                         non_speech_regions,
                     )
                     written_files: list[Path] = []
@@ -442,8 +444,22 @@ class ASRPipeline:
 
         parallel_start = time.perf_counter()
 
-        if True:  # phoneme_first engine removed \u2014 standard path only
-            # \u2500\u2500 Standard: transcription + diarization in parallel \u2500\u2500
+        if not self._config.diarization.enabled:
+            # Bengali fusion path: no voice clustering — the fusion LLM
+            # labels ENUMERATOR / RESPONDENT from what is said.
+            console.rule("[stage]Stage 3: Transcription[/stage]", style="cyan")
+            logger.info("  Diarization disabled — roles are labelled by "
+                        "the fusion LLM")
+            asr_segments = self._run_transcription(
+                chunks, language, engine_name, omni_lang, wav_path)
+            logger.info(
+                f"[success]\u2713 Stage 3 completed[/success] "
+                f"in {time.perf_counter() - parallel_start:.1f}s"
+            )
+            return asr_segments, DiarizationResult(num_speakers=0, segments=[])
+
+        if True:  # phoneme_first engine removed — standard path only
+            # ── Standard: transcription + diarization in parallel ──
             console.rule(
                 "[stage]Stages 3 & 4: Transcription + Diarization (parallel)[/stage]",
                 style="cyan",
@@ -534,31 +550,6 @@ class ASRPipeline:
                         all_segments.extend(segments)
                         progress.advance(task)
 
-        elif engine_name == "qwen":
-            # ── Qwen3-ASR engine (default for non-high-resource) ──
-            # VAD chunking supplies segment boundaries; this engine
-            # only produces text per chunk.
-            if self._qwen is None or not self._qwen.is_loaded:
-                self._qwen = QwenEngine(
-                    self._config.qwen,
-                    device=self._config.pipeline.device,
-                )
-                self._qwen.load()
-
-            logger.info(
-                f"  Transcribing {len(chunks)} chunks with "
-                f"{self._qwen.name}"
-            )
-            progress = create_progress("Transcription")
-            with progress:
-                task = progress.add_task(
-                    "Qwen3-ASR", total=len(chunks),
-                )
-                for chunk in chunks:
-                    segments = self._qwen.transcribe_chunk(chunk, language)
-                    all_segments.extend(segments)
-                    progress.advance(task)
-
         elif engine_name == "titu":
             # ── titu Bengali FastConformer-CTC engine ──
             # NeMo model. Batched inference is significantly faster
@@ -568,6 +559,7 @@ class ASRPipeline:
                     device=self._config.pipeline.device,
                     batch_size=self._config.titu.batch_size,
                     model_id=self._config.titu.model_id,
+                    revision=self._config.titu.revision,
                 )
                 self._titu.load()
 
@@ -589,35 +581,6 @@ class ASRPipeline:
                     all_segments.extend(segs)
                     for _ in batch:
                         progress.advance(task)
-
-        elif engine_name == "indic_conformer":
-            # ── AI4Bharat IndicConformer-600M (open, local) ──
-            # Loads via transformers trust_remote_code; per-utterance
-            # call interface, so we loop chunks. decoder configurable
-            # via pipeline.indic_conformer_decoder (ctc|rnnt).
-            decoder = getattr(
-                self._config.pipeline, "indic_conformer_decoder", "rnnt")
-            if self._indic_conformer is None or not self._indic_conformer.is_loaded:
-                self._indic_conformer = IndicConformerEngine(
-                    device=self._config.pipeline.device,
-                    decoder=decoder,
-                )
-                self._indic_conformer.load()
-
-            logger.info(
-                f"  Transcribing {len(chunks)} chunks with "
-                f"{self._indic_conformer.name}"
-            )
-            progress = create_progress("Transcription")
-            with progress:
-                task = progress.add_task(
-                    self._indic_conformer.name, total=len(chunks),
-                )
-                for chunk in chunks:
-                    segs = self._indic_conformer.transcribe_chunk(
-                        chunk, language)
-                    all_segments.extend(segs)
-                    progress.advance(task)
 
         else:  # omnilingual
             if self._omnilingual is None:
@@ -764,9 +727,11 @@ class ASRPipeline:
             translator = FusionTranslator(
                 device=self._config.pipeline.device,
                 whisper_model=fc.whisper_model,
+                whisper_revision=fc.whisper_revision,
                 whisper_ct2_path=fc.whisper_ct2_path,
                 gguf_repo=fc.gguf_repo,
                 gguf_file=fc.gguf_file,
+                gguf_revision=fc.gguf_revision,
                 gguf_n_gpu_layers=fc.gguf_n_gpu_layers,
                 prompt_lookup_tokens=fc.prompt_lookup_tokens,
                 whisper_batch_size=fc.whisper_batch_size,
@@ -873,15 +838,8 @@ class ASRPipeline:
         engines_used = []
         if engine_name == "whisper":
             engines_used.append(f"Whisper {self._config.whisper.model_size}")
-        elif engine_name == "qwen":
-            engines_used.append(f"Qwen3-ASR ({self._config.qwen.model})")
         elif engine_name == "titu":
             engines_used.append("titu (FastConformer-CTC Bengali)")
-        elif engine_name == "indic_conformer":
-            dec = getattr(
-                self._config.pipeline, "indic_conformer_decoder", "rnnt")
-            engines_used.append(
-                f"IndicConformer-600M ({dec.upper()}, AI4Bharat)")
         else:
             engines_used.append(f"Omnilingual {self._config.omnilingual.model_card}")
 

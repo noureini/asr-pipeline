@@ -32,7 +32,7 @@ logger = logging.getLogger("asr_pipeline")
 # Survey wiki auto-loader (used by QwenCorrector / QwenTranslator)
 # =============================================================================
 # If data/survey_wiki/ is present (built once by
-# scripts/build_survey_wiki.py from the MMI Protocol docx), inject
+# scripts/build_survey_wiki.py on the archive/experiments branch from the MMI Protocol docx), inject
 # the domain vocabulary into the corrector's system context so the
 # LLM gravitates toward valid survey-domain terms when titu's
 # output is ambiguous. Zero-config: drops in automatically when the
@@ -262,7 +262,7 @@ class QwenCorrector:
         if user_ctx:
             ctx_pieces.append(user_ctx)
         # Auto-load the survey wiki (built once via
-        # scripts/build_survey_wiki.py) if present. Gives the
+        # scripts/build_survey_wiki.py on the archive/experiments branch) if present. Gives the
         # corrector the survey domain anchor — the LLM gravitates
         # toward valid domain terms when titu's output is ambiguous
         # (e.g. পৌরসা → পৌরসভা, আইলা preserved as the cyclone name).
@@ -354,6 +354,7 @@ class GGUFProcessor:
         gguf_path: Optional[str] = None,
         gguf_repo: Optional[str] = None,
         gguf_file: Optional[str] = None,
+        gguf_revision: Optional[str] = None,
         n_gpu_layers: int = -1,
         n_ctx: int = 4096,
         n_threads: int = 8,
@@ -364,6 +365,7 @@ class GGUFProcessor:
         self._path = gguf_path
         self._repo = gguf_repo
         self._file = gguf_file
+        self._revision = gguf_revision
         self._n_gpu_layers = n_gpu_layers
         self._n_ctx = n_ctx
         self._n_threads = n_threads
@@ -436,24 +438,19 @@ class GGUFProcessor:
             elif self._repo and self._file:
                 # Prefer the already-cached file via a pure local-cache
                 # lookup (no HF API call) so this works fully offline
-                # (HF_HUB_OFFLINE) and without a network. Only fall back
-                # to from_pretrained (which hits the API + downloads) if
-                # the file isn't cached yet.
-                model_path = None
+                # (HF_HUB_OFFLINE) and without a network. Download only if
+                # the file is not cached yet.
+                from huggingface_hub import hf_hub_download
                 try:
-                    from huggingface_hub import hf_hub_download
                     model_path = hf_hub_download(
                         repo_id=self._repo, filename=self._file,
-                        local_files_only=True)
+                        revision=self._revision, local_files_only=True)
                 except Exception:
-                    model_path = None
-                if model_path:
-                    self._llm = Llama(model_path=model_path, **common)
-                else:
                     # Not cached — one-time download, then local.
-                    self._llm = Llama.from_pretrained(
-                        repo_id=self._repo, filename=self._file, **common
-                    )
+                    model_path = hf_hub_download(
+                        repo_id=self._repo, filename=self._file,
+                        revision=self._revision)
+                self._llm = Llama(model_path=model_path, **common)
             else:
                 logger.warning(
                     "  GGUF backend: set gguf_path OR "

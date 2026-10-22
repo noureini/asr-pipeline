@@ -1,0 +1,941 @@
+---
+title: "Using AI for Transcription & Data Quality Assurance"
+subtitle: "Day 2 · AI Tools for Data Acquisition and Analysis"
+author: "Noureini Sayouti"
+institute: "DECSU"
+date: 6 Oct, 2026
+date-format: "D MMMM YYYY"
+footer: "AI-Enabled Research Bootcamp"
+logos:
+  - ../../../assets/images/logos/LOGO_BLACK_WB_DEC_01.png
+  - images/lsms-logo.png
+  - ../../../assets/images/logos/AI BOOTCAMP - Branding (13).png
+
+format:
+  bootcamp-revealjs:
+    embed-resources: true
+---
+
+```{r}
+#| label: setup
+#| include: false
+
+# ../../../ matches the relative path from a qmd file saved
+# in the location: sessions/<day>/<topic>/presentation.qmd.
+# Update the file path for presentations elsewhere
+source("../../../_extensions/bootcamp/setup_palettes.R")
+
+knitr::opts_chunk$set(echo = FALSE, warning = FALSE, message = FALSE)
+```
+
+## Objective
+
+```{=html}
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Noto+Sans+Bengali:wght@400;600&display=swap">
+<style>
+.reveal .logo-strip{align-items:center;}
+.reveal .logo-strip img:nth-child(2){max-width:420px;max-height:50px;}
+:root{
+  --dark:#530153; --base:#800280; --light:#B974B9; --tint:#F4EAF4;
+  --grey:#6B6B6B; --rule:#E2E2E2; --ink:#1A1A1A;
+  --ok:#1E8F5B; --warn:#A6640C; --bad:#C0392B;
+  --shadow:0 2px 6px rgba(83,1,83,.10);
+}
+.reveal .bn{font-family:"Noto Sans Bengali","Lato",sans-serif;font-size:1.08em;}
+.reveal .lede{font-size:1.02em;color:var(--dark);font-weight:700;margin:0.1em 0 0.7em;line-height:1.35;}
+.reveal .muted{color:var(--grey);}
+.reveal .small{font-size:0.72em;}
+.reveal .cap{font-size:0.5em;color:var(--grey);margin-top:0.7em;}
+.reveal .mono{font-family:"SFMono-Regular",Consolas,monospace;}
+
+/* ---------- shared visual vocabulary ---------- */
+.v{font-size:0.8em;line-height:1.38;}
+.v.lg{font-size:0.9em;}
+.kick{display:block;font:700 0.72em Montserrat,sans-serif;letter-spacing:.12em;text-transform:uppercase;color:var(--base);margin-bottom:0.35em;}
+.ttl{display:block;font:700 1.08em Montserrat,sans-serif;color:var(--dark);margin-bottom:0.3em;line-height:1.25;}
+.node{background:#fff;border:2px solid var(--base);border-radius:12px;padding:0.8em 0.95em;box-shadow:var(--shadow);}
+.node.qa{background:var(--tint);border:1.5px solid var(--light);}
+.node.plain{border:1.5px solid var(--rule);}
+.node.hero{background:var(--dark);border-color:var(--dark);color:#fff;}
+.node.hero .ttl{color:#fff;} .node.hero .kick{color:var(--light);}
+.node.dash{border-style:dashed;border-color:var(--light);box-shadow:none;}
+.node p{margin:0.25em 0;}
+.g2{display:grid;grid-template-columns:1fr 1fr;gap:0.8em;}
+.g3{display:grid;grid-template-columns:repeat(3,1fr);gap:0.8em;}
+.g4{display:grid;grid-template-columns:repeat(4,1fr);gap:0.8em;}
+.dot{display:inline-flex;align-items:center;justify-content:center;width:2em;height:2em;border-radius:50%;
+  border:2px solid var(--base);color:var(--base);background:#fff;font:700 0.85em Montserrat,sans-serif;flex:none;}
+.dot.fill{background:var(--base);color:#fff;}
+.banner{display:flex;align-items:center;gap:0.8em;background:var(--dark);color:#fff;border-radius:10px;padding:0.6em 1em;margin-top:1em;}
+.banner b{color:#fff;}
+.banner.light{background:var(--tint);color:var(--ink);border-left:4px solid var(--base);border-radius:0 10px 10px 0;}
+.banner.light b{color:var(--dark);}
+.icon{width:1.9em;height:1.9em;flex:none;}
+.icon path,.icon rect,.icon circle,.icon polyline{fill:none;stroke:currentColor;stroke-width:2;stroke-linecap:round;stroke-linejoin:round;}
+.ok{color:var(--ok);font-weight:700;} .bad{color:var(--bad);font-weight:700;}
+.chip{display:inline-block;border-radius:999px;padding:0.12em 0.7em;font-size:0.85em;font-weight:700;border:1.5px solid var(--light);color:var(--dark);background:#fff;}
+.arrowcol{display:flex;align-items:center;justify-content:center;color:var(--light);font:700 1.6em Montserrat,sans-serif;}
+
+/* field checklist */
+.field .node{display:grid;grid-template-columns:auto 1fr;column-gap:0.7em;align-content:start;padding:0.7em 0.85em;}
+.field .node .icon{grid-row:1 / span 2;width:1.6em;height:1.6em;}
+.field .node .ttl{margin-bottom:0.15em;}
+.term.sm pre code{font-size:0.7em!important;padding:0.5em 0.9em!important;}
+.term.sm .tb{padding:0.25em 0.7em;}
+
+/* objective tiles */
+.obj .node{display:flex;flex-direction:column;gap:0.4em;}
+.obj .head{display:flex;align-items:center;gap:0.6em;}
+.obj .head .ttl{margin:0;}
+
+/* agenda rail */
+.rail{position:relative;display:grid;grid-template-columns:repeat(5,1fr);margin-top:1.4em;}
+.rail:before{content:"";position:absolute;left:10%;right:10%;top:1em;height:2px;background:var(--rule);}
+.rail .st{position:relative;text-align:center;padding:0 0.5em;}
+.rail .st .dot{width:2.3em;height:2.3em;font-size:0.9em;}
+.rail .st .ttl{margin-top:0.7em;font-size:1.1em;}
+.rail .st p{color:#3a3a3a;margin:0.3em 0 0.6em;}
+.rail .st .min{font:700 0.8em Montserrat,sans-serif;letter-spacing:.1em;color:var(--grey);}
+.rail .st.qa .dot{background:var(--tint);}
+
+/* setting */
+.setting{display:grid;grid-template-columns:1.55fr 1fr;gap:1em;align-items:stretch;}
+.setting .ch{display:flex;gap:0.8em;align-items:flex-start;padding:0.65em 0.9em;margin-bottom:0.55em;}
+.setting .ch .icon{color:var(--base);margin-top:0.1em;}
+.setting .hero{display:flex;flex-direction:column;justify-content:center;}
+.setting .big{font:700 2.6em Montserrat,sans-serif;line-height:1;color:#fff;}
+.setting .hero ul{list-style:none;margin:0.7em 0 0;padding:0;}
+.setting .hero li{margin:0.3em 0;font-size:1em;}
+.setting .hero li:before{content:"✕ ";color:var(--light);font-weight:700;}
+
+/* never invent */
+.fails{display:grid;grid-template-columns:1fr 1fr;gap:1em;margin:0.2em 0 0.9em;}
+.fail{display:grid;grid-template-columns:1fr auto 1fr;align-items:center;gap:0.6em;}
+.fail .side{text-align:center;}
+.fail .num{display:block;font:700 2.5em Montserrat,sans-serif;line-height:1.05;color:var(--dark);}
+.fail .num.x{color:var(--bad);text-decoration:line-through;text-decoration-thickness:3px;}
+.fail .lab{font-size:0.85em;color:var(--grey);}
+.rules3{display:grid;grid-template-columns:repeat(3,1fr);gap:0.8em;}
+.rules3 .node{border-width:0 0 0 4px;border-radius:0 10px 10px 0;box-shadow:none;background:var(--tint);border-color:var(--base);}
+
+/* what does not work */
+.nowork .node{border-top:4px solid var(--bad);border-left:1.5px solid var(--rule);border-right:1.5px solid var(--rule);border-bottom:1.5px solid var(--rule);display:flex;flex-direction:column;}
+.nowork .viz{height:5.4em;display:flex;align-items:center;justify-content:center;margin:0.2em 0 0.6em;background:#FBF8FB;border-radius:8px;}
+.minibars{width:88%;}
+.minibars .r{display:grid;grid-template-columns:6.8em 1fr 2.6em;align-items:center;gap:0.4em;margin:0.35em 0;font-size:0.9em;}
+.minibars .b{height:0.85em;border-radius:0 4px 4px 0;}
+.numfix{font:700 1.45em/1.35 "SFMono-Regular",Consolas,monospace;color:var(--dark);text-align:center;}
+.numfix .x{color:var(--bad);}
+
+/* witnesses */
+.wit{display:grid;grid-template-columns:1fr auto 1fr;gap:0.7em;align-items:stretch;}
+.wit .plus{display:flex;align-items:center;font:700 2em Montserrat,sans-serif;color:var(--light);}
+.wit .row{display:flex;gap:0.5em;margin:0.35em 0;}
+.wit .row b.ok,.wit .row b.bad{flex:none;width:1em;}
+.merge{display:flex;justify-content:center;margin:0.3em 0;}
+.merge svg{width:60%;height:2em;}
+.merge path{fill:none;stroke:var(--light);stroke-width:2;}
+
+/* svg diagrams generic */
+.reveal svg.dg{width:100%;height:auto;overflow:visible;font-family:"Lato",sans-serif;}
+.dg .n{fill:#fff;stroke:var(--rule);stroke-width:1.5;}
+.dg .n.ai{stroke:var(--base);stroke-width:2;}
+.dg .n.qa{fill:var(--tint);stroke:var(--light);}
+.dg .hero{fill:var(--dark);}
+.dg .pill{fill:#fff;stroke:var(--light);stroke-width:1.5;}
+.dg .pill.win{fill:var(--tint);stroke:var(--base);stroke-width:2.5;}
+.dg .ln{fill:none;stroke:var(--light);stroke-width:2;}
+.dg .ln.d{stroke:var(--dark);}
+.dg .ln.dash{stroke-dasharray:5 5;}
+.dg .t{fill:var(--dark);font:700 16px Montserrat,sans-serif;}
+.dg .s{fill:#3a3a3a;font-size:15px;}
+.dg .s.g{fill:var(--grey);}
+.dg .k{fill:var(--base);font:700 11px Montserrat,sans-serif;letter-spacing:.12em;}
+.dg .inv{fill:#fff;} .dg .k.inv{fill:var(--light);}
+.dg .x{fill:var(--grey);text-decoration:line-through;}
+.dg .okc{fill:var(--ok);font-weight:700;}
+
+/* judge example */
+.reveal table.witness{font-size:0.8em!important;}
+.witness{line-height:1.5;border-collapse:separate;border-spacing:0 5px;width:100%;}
+.witness td{padding:0.55em 0.9em;vertical-align:middle;}
+.witness td:first-child{padding-left:1.1em;}
+.reveal .witness tr.j b,.reveal .witness tr.j strong{color:#fff!important;}
+.witness td:first-child{width:24%;white-space:nowrap;}
+.witness td:last-child{padding-left:1.1em!important;}
+.witness tr.w td{background:#fff;border-top:1.5px solid var(--rule);border-bottom:1.5px solid var(--rule);}
+.witness tr.w td:first-child{border-left:2px solid var(--base);border-radius:10px 0 0 10px;}
+.witness tr.w td:last-child{border-right:1.5px solid var(--rule);border-radius:0 10px 10px 0;}
+.witness tr.j td{background:var(--dark);color:#fff;}
+.witness tr.j td:first-child{border-radius:10px 0 0 10px;} .witness tr.j td:last-child{border-radius:0 10px 10px 0;}
+.witness tr.j .kick{color:var(--light);}
+.witness tr.o td{background:var(--tint);}
+.witness tr.o td:first-child{border-radius:10px 0 0 10px;border-left:4px solid var(--base);} .witness tr.o td:last-child{border-radius:0 10px 10px 0;}
+.witness .kick{margin:0;}
+.hl{background:#FCE9C8;border-radius:3px;padding:0 0.15em;color:var(--ink);}
+.hl.good{background:#D7F0E3;}
+
+/* models */
+.models .node{display:flex;flex-direction:column;}
+.models .hf{font-family:"SFMono-Regular",Consolas,monospace;font-size:0.8em;color:var(--base);margin:0.1em 0 0.4em;}
+.models .node{padding:0.7em 1em;}
+.models .ty{margin-top:0.2em;color:var(--grey);font-size:0.9em;border-top:1px solid var(--rule);padding-top:0.45em;}
+
+/* QA sandwich */
+.sand{display:grid;grid-template-columns:1fr 1.15fr 1fr;gap:0;margin-top:0.4em;}
+.sand .band{padding:0.75em 1em;font:700 0.95em Montserrat,sans-serif;display:flex;align-items:center;gap:0.6em;}
+.sand .c1 .band{background:var(--tint);color:var(--dark);border-radius:12px 0 0 12px;border:1.5px solid var(--light);border-right:none;}
+.sand .c2 .band{background:var(--dark);color:#fff;}
+.sand .c3 .band{background:var(--tint);color:var(--dark);border-radius:0 12px 12px 0;border:1.5px solid var(--light);border-left:none;}
+.sand .band .dot{width:1.9em;height:1.9em;font-size:0.8em;}
+.sand .c2 .band .dot{border-color:#fff;color:var(--dark);}
+.sand .body{padding:0.8em 1em 0;}
+.sand .body .ttl{font-size:1em;}
+.sand .lab{font:700 0.7em Montserrat,sans-serif;letter-spacing:.12em;color:var(--grey);text-transform:uppercase;padding:0 1em;margin-top:0.5em;display:block;}
+
+/* excel mock */
+.xl{border:1.5px solid var(--rule);border-radius:10px;overflow:hidden;box-shadow:var(--shadow);font-size:0.92em;}
+.xl .bar0{background:#F3F3F3;padding:0.35em 0.8em;display:flex;align-items:center;gap:0.5em;border-bottom:1px solid var(--rule);font-family:monospace;font-size:0.9em;color:#444;}
+.xl .bar0 i{width:0.7em;height:0.7em;border-radius:50%;background:#ddd;display:inline-block;}
+.xl table{width:100%;border-collapse:collapse;margin:0!important;font-size:1em!important;}
+.xl th{background:#FAFAFA;color:var(--grey);font-weight:700;text-align:left;padding:0.35em 0.7em;border-bottom:1px solid var(--rule)!important;font-size:0.9em;}
+.xl td{padding:0.33em 0.7em;border-bottom:1px solid #F0F0F0!important;}
+.xl td.mono{font-size:0.9em;color:#444;}
+.flag{display:inline-block;border-radius:5px;padding:0.05em 0.5em;font-weight:700;font-size:0.85em;color:#fff;}
+.f-ex{background:#1E8F5B;} .f-gd{background:#3DA174;} .f-fr{background:#A6640C;} .f-po{background:#C8702A;} .f-bd{background:#C0392B;} .f-cl{background:#6A3D9A;}
+.score{display:inline-block;width:2.2em;text-align:right;font-weight:700;}
+.term{background:#221522;color:#EADFEA;border-radius:10px;overflow:hidden;box-shadow:0 4px 14px rgba(83,1,83,.18);}
+.term .tb{background:#3A243A;padding:0.4em 0.8em;display:flex;gap:0.4em;align-items:center;}
+.term .tb i{width:0.7em;height:0.7em;border-radius:50%;display:inline-block;}
+.term .tb span{margin-left:0.6em;font:0.85em monospace;color:#bfa8bf;}
+.term pre{margin:0!important;background:transparent!important;border:none!important;box-shadow:none!important;width:100%!important;}
+.term pre{font-size:1em!important;}
+.term code{color:#EADFEA!important;font-size:0.82em!important;line-height:1.5!important;background:transparent!important;padding:0.8em 1em!important;display:block;white-space:pre;}
+.term .c{color:#B98FB9;} .term .p{color:#E6A8E6;font-weight:700;}
+.uses{margin-top:0.8em;}
+.uses .u{display:flex;align-items:center;gap:0.7em;margin:0.45em 0;}
+.uses .icon{color:var(--base);width:1.6em;height:1.6em;}
+
+/* guards */
+.guards .node{display:flex;flex-direction:column;padding:0.75em 0.95em;}
+.xf{display:grid;grid-template-columns:1fr auto 1fr;align-items:center;gap:0.5em;margin-top:auto;background:#FBF8FB;border-radius:8px;padding:0.5em 0.6em;font-size:0.92em;}
+.xf .in{color:#444;} .xf .ar{color:var(--light);font-weight:700;}
+.xf .out{font-weight:700;color:var(--dark);}
+.xf code{font-size:0.95em;}
+
+/* worklist dots */
+.wl{display:grid;grid-template-columns:1.25fr 1fr;gap:1.2em;align-items:start;}
+.dots{display:grid;grid-template-columns:repeat(24,1fr);gap:5px;}
+.dots i{display:block;aspect-ratio:1;border-radius:50%;background:#E8E3E8;}
+.dots i.f{background:var(--base);box-shadow:0 0 0 2px #fff,0 0 0 3.5px var(--base);}
+.trig .t{display:flex;align-items:center;gap:0.6em;margin:0.45em 0;}
+.files{margin-top:0.8em;border-top:1px solid var(--rule);padding-top:0.5em;}
+.files .f{display:grid;grid-template-columns:11em 1fr;gap:0.6em;margin:0.25em 0;font-size:0.9em;}
+.files code{color:var(--base);}
+
+/* decisions */
+.dec{display:grid;grid-template-columns:repeat(2,1fr);gap:0.6em 0.9em;}
+.dec .d{display:grid;grid-template-columns:auto 1fr;gap:0.7em;align-items:start;padding:0.55em 0.8em;border:1.5px solid var(--rule);border-radius:10px;background:#fff;}
+.dec .d .ttl{font-size:0.98em;margin-bottom:0.15em;}
+.dec .d p{margin:0;color:#3a3a3a;}
+.dec .d.wide{grid-column:1 / -1;background:var(--tint);border-color:var(--light);}
+
+/* stats */
+.stats{display:flex;gap:0.8em;margin:0.7em 0 0;}
+.stat{flex:1;border-left:4px solid var(--base);padding:0.2em 0.7em;}
+.stat .n{display:block;font:700 1.35em Montserrat,sans-serif;color:var(--dark);line-height:1.1;}
+.stat .l{display:block;font-size:0.6em;color:var(--grey);line-height:1.3;}
+
+/* agent prompt */
+.agent{display:grid;grid-template-columns:1.45fr 1fr;gap:1.1em;align-items:start;}
+.bubble{background:var(--tint);border-radius:16px 16px 16px 4px;padding:0.8em 1em;border:1.5px solid var(--light);font-family:"SFMono-Regular",Consolas,monospace;font-size:0.78em;line-height:1.5;color:#2a2a2a;white-space:pre-wrap;}
+.who{font:700 0.75em Montserrat,sans-serif;letter-spacing:.12em;color:var(--grey);margin-bottom:0.4em;display:block;}
+.ann .a{display:flex;gap:0.6em;align-items:flex-start;margin:0 0 0.65em;}
+.ann .a .dot{width:1.7em;height:1.7em;font-size:0.75em;}
+
+/* roadmap */
+.road{display:grid;grid-template-columns:1.35fr auto 1fr auto 1fr auto 1fr;align-items:stretch;gap:0.4em;margin-top:0.6em;}
+.road .node{display:flex;flex-direction:column;}
+.road .node p{margin:0.2em 0;}
+.status{display:inline-flex;align-items:center;gap:0.5em;background:#E6F4EC;color:#14653F;border-radius:999px;padding:0.25em 0.9em;font-weight:700;font-size:0.95em;}
+
+/* takeaways */
+.tk{display:flex;flex-direction:column;gap:0.5em;}
+.tk .r{display:grid;grid-template-columns:auto 1fr;gap:0.9em;align-items:center;padding:0.55em 0.9em;border-radius:10px;border:1.5px solid var(--rule);background:#fff;}
+.tk .r:nth-child(odd){background:#FCF9FC;}
+.tk .r .ttl{display:inline;font-size:1.02em;}
+.tk .r span.x{color:#3a3a3a;}
+
+/* results (kept) */
+.bar{display:flex;height:2.1em;border-radius:8px;overflow:hidden;margin:0.6em 0 0.4em;font-size:0.7em;font-weight:700;color:#fff;}
+.bar div{display:flex;align-items:center;justify-content:center;}
+.bar .s1{background:var(--dark);} .bar .s2{background:var(--light);} .bar .s3{background:var(--bad);}
+.barkey{font-size:0.62em;line-height:1.45;}
+.barkey p{margin:0.25em 0;}
+.barkey i{display:inline-block;width:0.8em;height:0.8em;border-radius:2px;margin-right:0.4em;vertical-align:-0.05em;}
+/* pipeline svg */
+.reveal svg.pipe{width:100%;height:auto;margin-top:0.2em;font-family:"Lato",sans-serif;overflow:visible;}
+.pipe .rail line{stroke:var(--rule);stroke-width:2;}
+.pipe .rail circle{fill:#fff;stroke:var(--base);stroke-width:2;}
+.pipe .rail text{fill:var(--base);font:700 13px Montserrat,sans-serif;text-anchor:middle;}
+.pipe .steplab text{fill:var(--grey);font:700 11.5px Montserrat,sans-serif;letter-spacing:.12em;text-anchor:middle;}
+.pipe .link path{fill:none;stroke:var(--light);stroke-width:2;}
+.pipe .link path.strong{stroke:var(--dark);}
+.pipe .link path.reject{stroke-dasharray:4 4;}
+.pipe .n{fill:#fff;stroke:var(--rule);stroke-width:1.5;}
+.pipe .n.qa,.pipe .lg .qa{fill:var(--tint);stroke:var(--light);stroke-width:1.5;}
+.pipe .n.ai,.pipe .lg .ai{fill:#fff;stroke:var(--base);stroke-width:2;}
+.pipe .n.out{fill:#fff;stroke:var(--dark);stroke-width:2.5;}
+.pipe .hero{fill:var(--dark);}
+.pipe .rej{fill:#fff;stroke:var(--light);stroke-dasharray:4 4;}
+.pipe .rejt{fill:var(--grey);}
+.pipe .wave{fill:none;stroke:var(--base);stroke-width:2;stroke-linecap:round;stroke-linejoin:round;}
+.pipe .t{fill:var(--dark);font:700 15px Montserrat,sans-serif;}
+.pipe .t.big{font-size:17px;}
+.pipe .s{fill:#3a3a3a;font-size:13px;}
+.pipe .s.mono{font-family:monospace;font-size:12px;fill:var(--base);}
+.pipe .k{fill:var(--base);font:700 10.5px Montserrat,sans-serif;letter-spacing:.12em;}
+.pipe .inv,.pipe .inv text{fill:#fff;}
+.pipe .k.inv{fill:var(--light);}
+.pipe .brk{fill:none;stroke:var(--light);stroke-width:1.5;}
+.pipe .brkt{fill:var(--grey);font-style:italic;}
+.pipe .lg text{fill:var(--grey);font-size:12px;}
+
+/* results bar */
+.hatch{background:repeating-linear-gradient(135deg,#E8CDE8 0 7px,#CFA0CF 7px 12px)!important;}
+.bar .s2{color:var(--dark);}
+.bar .hatch{text-shadow:0 0 4px #fff,0 0 4px #fff;}
+.bar{gap:2px;}
+.bar div{border-radius:2px;}
+.bar .s1{background:var(--base);}
+.barbrace{font-size:0.58em;color:var(--grey);margin:-0.1em 0 0.6em;}
+.barbrace span{display:block;border-top:2px solid var(--light);padding-top:0.2em;text-align:center;}
+.barkey i.hatch{display:inline-block;}
+
+</style>
+```
+
+::: {.lede}
+Turn hard field audio into transcripts you can **trust and audit**: AI does the heavy lifting, people check only what matters.
+:::
+
+```{=html}
+<div class="v lg obj g4">
+  <div class="node plain"><div class="head"><span class="dot fill">1</span><span class="ttl">Diagnose</span></div>
+    <div>Why one ASR model, or one "clean this up" prompt, fails on field audio</div></div>
+  <div class="node plain"><div class="head"><span class="dot fill">2</span><span class="ttl">Design</span></div>
+    <div>A pipeline where <b>independent AI outputs check each other</b></div></div>
+  <div class="node qa"><div class="head"><span class="dot">3</span><span class="ttl">Assure</span></div>
+    <div>Quality checks <b>before, during and after</b> transcription</div></div>
+  <div class="node qa"><div class="head"><span class="dot">4</span><span class="ttl">Target</span></div>
+    <div>Send reviewers to the <b>few segments</b> that need a human</div></div>
+</div>
+<div class="v cap" style="font-size:0.5em">Case study: coastal-Bangladesh climate-survey interviews. The ideas transfer to any language and any recorded survey.</div>
+```
+
+## Agenda
+
+```{=html}
+<div class="v lg rail">
+  <div class="st"><span class="dot fill">1</span><span class="ttl">The problem</span><p>Why survey audio is hard, and what does not work</p><span class="min">5 MIN</span></div>
+  <div class="st"><span class="dot fill">2</span><span class="ttl">The approach</span><p>Two AI "witnesses" reconciled by a local LLM judge</p><span class="min">8 MIN</span></div>
+  <div class="st qa"><span class="dot">3</span><span class="ttl">Quality assurance</span><p>Good audio first, then guards and a review worklist</p><span class="min">12 MIN</span></div>
+  <div class="st"><span class="dot fill">4</span><span class="ttl">Results</span><p>An honest look at what the pipeline delivers</p><span class="min">5 MIN</span></div>
+  <div class="st"><span class="dot fill">5</span><span class="ttl">Use it yourself</span><p>Commands, hardware, and adapting it with an agent</p><span class="min">5 MIN</span></div>
+</div>
+<div class="v" style="text-align:center;margin-top:1.6em;"><span class="chip">+ 10 min questions</span></div>
+```
+
+# The problem {background-color="#530153"}
+
+## The setting: survey interviews from coastal Bangladesh
+
+**Goal:** clean, searchable Bengali transcripts with a faithful English translation.
+
+```{=html}
+<div class="v setting">
+  <div>
+    <div class="node plain ch">
+      <svg class="icon" viewBox="0 0 24 24"><polyline points="2,12 5,12 7,6 9,18 11,9 13,15 15,11 17,13 19,12 22,12"/></svg>
+      <div><span class="ttl">Hard audio</span>Field recordings at 8 kHz, ~12 kbps: telephony-grade, heavily compressed</div></div>
+    <div class="node plain ch">
+      <svg class="icon" viewBox="0 0 24 24"><path d="M4 5h16v10H9l-5 4z"/><path d="M8 9h8M8 12h5"/></svg>
+      <div><span class="ttl">Colloquial, regional Bengali</span>Dialect forms, fast speech, English banking and survey terms mixed in</div></div>
+    <div class="node plain ch">
+      <svg class="icon" viewBox="0 0 24 24"><rect x="5" y="11" width="14" height="9" rx="2"/><path d="M8 11V8a4 4 0 0 1 8 0v3"/></svg>
+      <div><span class="ttl">Sensitive data</span>Interviews with vulnerable households cannot leave the machine</div></div>
+  </div>
+  <div class="node hero">
+    <span class="kick">Hard constraint</span>
+    <span class="big">8 GB</span>
+    <span style="font-size:1.05em;margin-top:0.3em">one laptop GPU runs everything</span>
+    <ul><li>No cloud</li><li>No API calls</li><li>No closed models</li></ul>
+  </div>
+</div>
+```
+
+## The one rule: never invent data
+
+```{=html}
+<div class="v">
+<div class="fails">
+  <div class="node plain fail">
+    <div class="side"><span class="lab">AUDIO SAYS</span><span class="num">250</span><span class="lab">in the recording</span></div>
+    <div class="arrowcol">→</div>
+    <div class="side"><span class="lab">MODEL WRITES</span><span class="num x">2.5</span><span class="lab bad">plausible, wrong</span></div>
+  </div>
+  <div class="node plain fail">
+    <div class="side"><span class="lab">AUDIO SAYS</span><span class="num">6</span><span class="lab">household members</span></div>
+    <div class="arrowcol">→</div>
+    <div class="side"><span class="lab">MODEL WRITES</span><span class="num x">60</span><span class="lab bad">nobody notices</span></div>
+  </div>
+</div>
+<div class="rules3">
+  <div class="node"><span class="ttl">Numbers come from the audio</span>Never from the model's sense of what is likely</div>
+  <div class="node"><span class="ttl">Fluent-but-wrong is worst</span>A clean sentence with a wrong fact is never questioned</div>
+  <div class="node"><span class="ttl">Unsure? Say so</span>An honest <code>[unclear]</code> beats a confident guess</div>
+</div>
+<div class="cap">Illustrative values.</div>
+</div>
+```
+
+## What does not work
+
+```{=html}
+<div class="v nowork g3">
+  <div class="node">
+    <span class="kick" style="color:var(--bad)">Failure 1</span><span class="ttl">One ASR engine</span>
+    <div class="viz"><svg viewBox="0 0 220 60" style="width:88%"><rect x="2" y="16" width="56" height="28" rx="6" fill="#fff" stroke="#800280" stroke-width="2"/><text x="30" y="35" text-anchor="middle" style="font:700 12px Montserrat;fill:#530153">ASR</text><path d="M60,30 H84" stroke="#B974B9" stroke-width="2"/><path d="M88,30 h118" stroke="#CCC" stroke-width="6" stroke-linecap="round"/><path d="M110,30 h14 M150,30 h10 M182,30 h14" stroke="#C0392B" stroke-width="6" stroke-linecap="round"/></svg></div>
+    <div>Too many errors on compressed, dialectal audio, and <b>no signal about where</b> it went wrong.</div>
+  </div>
+  <div class="node">
+    <span class="kick" style="color:var(--bad)">Failure 2</span><span class="ttl">One "clean this up" prompt</span>
+    <div class="viz"><div class="minibars">
+      <div class="r"><span>Naive rewrite</span><span class="b" style="width:100%;background:var(--bad)"></span><b>53%</b></div>
+      <div class="r"><span>Constrained</span><span class="b" style="width:9.4%;background:var(--base)"></span><b>5%</b></div>
+      <div style="font-size:0.75em;color:var(--grey);text-align:center">character error rate</div>
+    </div></div>
+    <div>The LLM <b>rewrites text that was already correct</b>.</div>
+  </div>
+  <div class="node">
+    <span class="kick" style="color:var(--bad)">Failure 3</span><span class="ttl">Dedicated translation model</span>
+    <div class="viz"><div class="numfix">6 → <span class="x">696</span><br>250 → <span class="x">35</span></div></div>
+    <div>IndicTrans2 <b>corrupted numbers</b> on our interviews.</div>
+  </div>
+</div>
+<div class="v banner light"><svg class="icon" viewBox="0 0 24 24" style="color:var(--base)"><circle cx="12" cy="12" r="9"/><path d="M12 8v5M12 16v.5"/></svg>
+  <div><b>Lesson:</b> trust no single model. Give the AI <b>evidence</b>, <b>rules</b>, and a way to <b>abstain</b>.</div></div>
+```
+
+# The approach {background-color="#530153"}
+
+## The pipeline at a glance
+
+```{=html}
+<svg class="pipe" viewBox="0 0 1182 410" role="img" aria-label="Pipeline: field audio passes an audio quality gate, is transcribed by two independent ASR witnesses, reconciled by a local LLM judge that also labels enumerator and respondent, checked by deterministic guards, and produces a transcript and a review worklist.">
+<defs>
+  <marker id="ah" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#B974B9"/></marker>
+  <marker id="ahd" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#530153"/></marker>
+  <filter id="sh" x="-10%" y="-10%" width="120%" height="130%"><feDropShadow dx="0" dy="2" stdDeviation="3" flood-color="#530153" flood-opacity="0.10"/></filter>
+</defs>
+<g class="rail">
+  <line x1="150" y1="30" x2="1176" y2="30"/>
+  <g transform="translate(228,30)"><circle r="13"/><text y="4.5">0</text></g>
+  <g transform="translate(446,30)"><circle r="13"/><text y="4.5">1</text></g>
+  <g transform="translate(686,30)"><circle r="13"/><text y="4.5">2</text></g>
+  <g transform="translate(920,30)"><circle r="13"/><text y="4.5">3</text></g>
+  <g transform="translate(1112,30)"><circle r="13"/><text y="4.5">4</text></g>
+</g>
+<g class="steplab">
+  <text x="228" y="62">CHECK</text><text x="446" y="62">TRANSCRIBE</text><text x="686" y="62">RECONCILE</text><text x="920" y="62">GUARD</text><text x="1112" y="62">REVIEW</text>
+</g>
+<g class="link">
+  <path d="M118,195 H144" marker-end="url(#ah)"/>
+  <path d="M310,195 C330,195 326,135 344,135" marker-end="url(#ah)"/>
+  <path d="M310,195 C330,195 326,245 344,245" marker-end="url(#ah)"/>
+  <path d="M546,135 C568,135 566,180 586,180" marker-end="url(#ah)"/>
+  <path d="M546,245 C568,245 566,210 586,210" marker-end="url(#ah)"/>
+  <path d="M784,195 H816" marker-end="url(#ahd)" class="strong"/>
+  <path d="M1020,195 C1036,195 1034,135 1048,135" marker-end="url(#ahd)" class="strong"/>
+  <path d="M1020,195 C1036,195 1034,255 1048,255" marker-end="url(#ahd)" class="strong"/>
+  <path d="M228,259 V318" class="reject" marker-end="url(#ah)"/>
+</g>
+<g filter="url(#sh)"><rect class="n" x="8" y="145" width="110" height="100" rx="12"/></g>
+<path class="wave" d="M24,190 l6,-8 l6,16 l6,-26 l6,34 l6,-22 l6,12 l6,-6 l6,10 l6,-14 l6,8 l6,-4 l6,2"/>
+<text class="t" x="63" y="222" text-anchor="middle">Field audio</text>
+<text class="s" x="63" y="238" text-anchor="middle">8 kHz · dialect</text>
+
+<g filter="url(#sh)"><rect class="n qa" x="146" y="131" width="164" height="128" rx="12"/></g>
+<text class="t" x="228" y="160" text-anchor="middle">Audio quality</text>
+<text class="t" x="228" y="178" text-anchor="middle">gate</text>
+<text class="s" x="228" y="203" text-anchor="middle">SNR · clipping · silence</text>
+<text class="s" x="228" y="221" text-anchor="middle">score 0–100 per file</text>
+<text class="s" x="228" y="239" text-anchor="middle">one Excel report</text>
+<rect class="rej" x="163" y="322" width="130" height="46" rx="23"/>
+<text class="s rejt" x="228" y="341" text-anchor="middle">POOR / BAD</text>
+<text class="s rejt" x="228" y="358" text-anchor="middle">re-record or skip</text>
+
+<g filter="url(#sh)"><rect class="n ai" x="346" y="95" width="200" height="80" rx="12"/></g>
+<text class="k" x="362" y="117">WITNESS 1 · SOUND</text>
+<text class="t" x="362" y="140">titu · phonetic CTC</text>
+<text class="s" x="362" y="161">faithful to how it sounded</text>
+<g filter="url(#sh)"><rect class="n ai" x="346" y="205" width="200" height="80" rx="12"/></g>
+<text class="k" x="362" y="227">WITNESS 2 · STRUCTURE</text>
+<text class="t" x="362" y="250">Whisper · regional</text>
+<text class="s" x="362" y="271">fluent · N-best × 3 readings</text>
+
+<g filter="url(#sh)"><rect class="hero" x="588" y="111" width="196" height="168" rx="14"/></g>
+<text class="k inv" x="606" y="137">LLM JUDGE · LOCAL</text>
+<text class="t inv big" x="606" y="162">Gemma-3-12B</text>
+<g class="s inv">
+  <text x="606" y="192">✓ reconciles both witnesses</text>
+  <text x="606" y="213">✓ Bengali → English</text>
+  <rect x="598" y="219" width="180" height="22" rx="11" fill="#800280" stroke="#B974B9" stroke-width="1.5"/>
+  <text x="606" y="235" style="font-weight:700">✓ enumerator / respondent</text>
+  <text x="606" y="255">✓ temperature 0</text>
+</g>
+
+<g filter="url(#sh)"><rect class="n qa" x="818" y="121" width="202" height="148" rx="12"/></g>
+<text class="t" x="836" y="148">Deterministic guards</text>
+<g class="s">
+  <text x="836" y="176">• unheard number → [unclear]</text>
+  <text x="836" y="198">• foreign script → blanked</text>
+  <text x="836" y="220">• disagreement → flagged</text>
+</g>
+<text class="k" x="836" y="252">RULES, NOT AI</text>
+
+<g filter="url(#sh)"><rect class="n" x="1050" y="95" width="124" height="80" rx="12"/></g>
+<text class="t" x="1112" y="124" text-anchor="middle">Transcript</text>
+<text class="s mono" x="1112" y="146" text-anchor="middle">[bn] · [en]</text>
+<text class="s" x="1112" y="164" text-anchor="middle">+ speaker roles</text>
+<g filter="url(#sh)"><rect class="n out" x="1050" y="215" width="124" height="80" rx="12"/></g>
+<text class="t" x="1112" y="244" text-anchor="middle">Review</text>
+<text class="t" x="1112" y="262" text-anchor="middle">worklist</text>
+<text class="s" x="1112" y="283" text-anchor="middle">flagged spots only</text>
+
+<path class="brk" d="M346,318 v8 H784 v-8"/>
+<text class="s brkt" x="565" y="350" text-anchor="middle">Open-source models · fully local · loaded one at a time on a single 8 GB GPU</text>
+<g class="lg" transform="translate(8,395)">
+  <rect width="16" height="12" rx="3" class="qa"/><text x="22" y="10">Quality assurance (deterministic)</text>
+  <rect x="250" width="16" height="12" rx="3" class="ai"/><text x="272" y="10">AI model step</text>
+</g>
+</svg>
+```
+
+## Two witnesses, two failure modes
+
+```{=html}
+<div class="v wit">
+  <div class="node">
+    <span class="kick">Witness 1 · Sound</span><span class="ttl">titu · phonetic CTC</span>
+    <div class="muted">Transcribes sound token by token, with little language-model bias</div>
+    <div class="row"><b class="ok">+</b><span>Faithful to the <b>sound</b> of names, numbers, dialect words</span></div>
+    <div class="row"><b class="bad">−</b><span>Can run words together or look garbled</span></div>
+  </div>
+  <div class="plus">+</div>
+  <div class="node">
+    <span class="kick">Witness 2 · Structure</span><span class="ttl">Whisper · regional fine-tune</span>
+    <div class="muted">Seq2seq decoder with a strong internal language model</div>
+    <div class="row"><b class="ok">+</b><span>Fluent, well-formed <b>sentences</b></span></div>
+    <div class="row"><b class="bad">−</b><span>Swaps in a plausible wrong word: <span class="bn">বন্যা</span> "flood" → <span class="bn">বোন না</span> "sister-no"</span></div>
+  </div>
+</div>
+<div class="v merge"><svg viewBox="0 0 400 40" preserveAspectRatio="none"><path d="M40,0 C40,25 200,15 200,40 M360,0 C360,25 200,15 200,40"/></svg></div>
+<div class="v banner"><svg class="icon" viewBox="0 0 24 24"><circle cx="9" cy="12" r="6"/><circle cx="15" cy="12" r="6"/></svg>
+  <div><b>Their errors are largely independent.</b> Where one fails, the other often holds: titu anchors the sound, Whisper anchors the structure.</div></div>
+```
+
+## Why N-best, not just the top answer
+
+```{=html}
+<svg class="dg" viewBox="0 0 1100 330" role="img" aria-label="Whisper produces three candidate readings; the LLM judge uses context and titu's phonetic anchor to pick 'ward number one'.">
+  <defs><marker id="nb" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0,0 L10,5 L0,10 z" fill="#B974B9"/></marker>
+  <marker id="nbd" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0,0 L10,5 L0,10 z" fill="#530153"/></marker></defs>
+  <rect class="n ai" x="10" y="105" width="170" height="90" rx="12"/>
+  <text class="k" x="28" y="132">WITNESS 2</text><text class="t" x="28" y="156">Whisper</text><text class="s" x="28" y="178">sampled 3 readings</text>
+  <path class="ln" d="M180,150 C215,150 210,60 245,60" marker-end="url(#nb)"/>
+  <path class="ln" d="M180,150 H245" marker-end="url(#nb)"/>
+  <path class="ln" d="M180,150 C215,150 210,240 245,240" marker-end="url(#nb)"/>
+  <rect class="pill" x="250" y="38" width="230" height="44" rx="22"/><text class="s" x="365" y="66" text-anchor="middle">"world number one"</text>
+  <rect class="pill" x="250" y="128" width="230" height="44" rx="22"/><text class="s" x="365" y="156" text-anchor="middle">"ward number one"</text>
+  <rect class="pill" x="250" y="218" width="230" height="44" rx="22"/><text class="s" x="365" y="246" text-anchor="middle">"word number one"</text>
+  <path class="ln" d="M480,60 C520,60 520,140 560,140" marker-end="url(#nb)"/>
+  <path class="ln" d="M480,150 H560" marker-end="url(#nb)"/>
+  <path class="ln" d="M480,240 C520,240 520,160 560,160" marker-end="url(#nb)"/>
+  <rect class="n qa" x="320" y="285" width="160" height="38" rx="10"/><text class="s" x="400" y="309" text-anchor="middle">titu: /ward/</text>
+  <path class="ln dash" d="M480,304 C540,304 600,260 610,214" marker-end="url(#nb)"/>
+  <rect class="hero" x="565" y="86" width="200" height="128" rx="14"/>
+  <text class="k inv" x="585" y="114">LLM JUDGE</text>
+  <text class="t inv" x="585" y="140">weighs context</text>
+  <text class="s inv" x="585" y="166">household survey →</text>
+  <text class="s inv" x="585" y="188">admin. unit fits</text>
+  <path class="ln d" d="M765,150 H810" marker-end="url(#nbd)"/>
+  <rect class="pill win" x="815" y="122" width="270" height="56" rx="28"/><text class="t" x="950" y="156" text-anchor="middle">"ward number one" ✓</text>
+  <text class="s g" x="950" y="210" text-anchor="middle">picked with evidence,</text>
+  <text class="s g" x="950" y="230" text-anchor="middle">not by a single guess</text>
+</svg>
+<div class="v" style="font-size:0.6em;margin-top:0.6em"><b style="color:var(--dark)">Generative error correction:</b> an LLM given several hypotheses beats an LLM correcting a single transcript.</div>
+```
+
+## The LLM judge in action
+
+```{=html}
+<table class="witness">
+<tr class="w"><td><span class="kick">Witness 1 · sound</span></td><td><span class="bn"><span class="hl good">খানায়</span> ছয়জন সদস্য আছে আমরার ঘরে থাকে সবাই</span></td></tr>
+<tr class="w"><td><span class="kick">Witness 2 · fluent</span></td><td><span class="bn"><span class="hl">থানায়</span> ছয় জন সদস্য আছে। সবাই আমাদের ঘরে থাকে।</span> <span class="muted">(+2 more readings)</span></td></tr>
+<tr class="j"><td><span class="kick">Judge reasoning</span></td><td>"Household" (<span class="bn">খানা</span>) fits a household roster, "police station" (<span class="bn">থানা</span>) does not → take titu's word, keep Whisper's structure. The number <b>6</b> agrees in both → copy it exactly.</td></tr>
+<tr class="o"><td><span class="kick">Output [bn]</span></td><td><span class="bn">খানায় ছয়জন সদস্য আছে। সবাই আমরার ঘরে থাকে।</span></td></tr>
+<tr class="o"><td><span class="kick">Output [en]</span></td><td>There are six members in the household. They all live in our house.</td></tr>
+</table>
+<div class="cap">Illustrative example, invented, not real interview data. The full reasoning trace is saved per segment in <code>.reasoning.txt</code>.</div>
+```
+
+## Who is speaking? The LLM labels the roles
+
+```{=html}
+<svg class="dg" viewBox="0 0 1100 290" role="img" aria-label="A transcript segment that contains both a question and its answer goes to the LLM judge, which reads the content, splits it into turns and labels each turn ENUMERATOR or RESPONDENT.">
+  <defs>
+    <marker id="ra" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0,0 L10,5 L0,10 z" fill="#B974B9"/></marker>
+    <marker id="rad" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0,0 L10,5 L0,10 z" fill="#530153"/></marker>
+  </defs>
+  <text class="k" x="10" y="16">1 · RECONCILED SEGMENT</text>
+  <text class="k" x="432" y="16">2 · LLM READS THE CONTENT</text>
+  <text class="k" x="736" y="16">3 · ROLE-LABELLED TURNS</text>
+
+  <!-- segment -->
+  <rect class="n ai" x="10" y="72" width="370" height="150" rx="12"/>
+  <text class="k" x="28" y="98">ONE SEGMENT · NO SPEAKER INFO</text>
+  <text x="28" y="134" style="font-family:'Noto Sans Bengali',sans-serif;font-size:17px;fill:#1A1A1A">আপনার পরিবারে কতজন সদস্য?</text>
+  <text x="28" y="164" style="font-family:'Noto Sans Bengali',sans-serif;font-size:17px;fill:#1A1A1A">আমার পরিবারে ছয়জন।</text>
+  <text class="s g" x="28" y="200">question and answer captured together</text>
+
+  <path class="ln" d="M380,147 H428" marker-end="url(#ra)"/>
+
+  <!-- LLM -->
+  <rect class="hero" x="432" y="52" width="260" height="190" rx="14"/>
+  <text class="k inv" x="452" y="80">LLM JUDGE · SAME CALL</text>
+  <text class="t inv" x="452" y="108">Who asks? Who answers?</text>
+  <text class="s inv" x="452" y="140">• asks survey questions, reads</text>
+  <text class="s inv" x="462" y="160">the consent script → enumerator</text>
+  <text class="s inv" x="452" y="186">• describes own life, family,</text>
+  <text class="s inv" x="462" y="206">floods, money → respondent</text>
+  <text class="s inv" x="452" y="230" style="font-weight:700">splits the segment into turns</text>
+
+  <path class="ln d" d="M692,120 C712,120 712,92 732,92" marker-end="url(#rad)"/>
+  <path class="ln d" d="M692,174 C712,174 712,202 732,202" marker-end="url(#rad)"/>
+
+  <!-- turns -->
+  <rect class="pill win" x="736" y="56" width="354" height="72" rx="14"/>
+  <text class="t" x="756" y="84">ENUMERATOR</text>
+  <text class="s" x="756" y="110">"How many members in your household?"</text>
+  <rect class="pill win" x="736" y="166" width="354" height="72" rx="14"/>
+  <text class="t" x="756" y="194">RESPONDENT</text>
+  <text class="s" x="756" y="220">"Six, in my family."</text>
+  <text class="s g" x="10" y="280" style="font-size:12px">Illustrative lines, invented.</text>
+</svg>
+<div class="v g3" style="font-size:0.6em;margin-top:0.3em">
+  <div class="node plain"><span class="ttl">No separate diarization model</span>Voice clustering can only say <i>which voice</i>, never <i>which role</i>. The LLM works from <b>what is said</b>.</div>
+  <div class="node qa"><span class="ttl">Auditable</span>The role decision and the turn split are written to the reasoning trace (<code>.reasoning.txt</code>) for every segment.</div>
+  <div class="node plain"><span class="ttl">Why it matters</span>Analysts get answers separated from questions, and auditors can check <b>what the enumerator actually asked</b>.</div>
+</div>
+```
+
+## The models: all open-source, all local
+
+```{=html}
+<div class="v models g3">
+  <div class="node"><span class="kick">Witness 1 · sound</span><span class="ttl">titu FastConformer</span>
+    <div class="hf">hishab/titu_stt_bn_fastconformer</div><div class="ty">NeMo FastConformer + CTC</div></div>
+  <div class="node"><span class="kick">Witness 2 · structure</span><span class="ttl">Whisper-medium</span>
+    <div class="hf">bengaliAI/tugstugi_bengaliai-regional-asr_whisper-medium</div><div class="ty">Regional Bengali fine-tune</div></div>
+  <div class="node hero"><span class="kick">Judge</span><span class="ttl">Gemma-3-12B</span>
+    <div class="hf" style="color:#E6C3E6">unsloth/gemma-3-12b-it-GGUF · Q4_K_XL</div><div class="ty" style="color:#D9BED9;border-color:#7a3a7a">Fusion, translation <b style="color:#fff">and role labels</b> · 4-bit</div></div>
+</div>
+<div class="v banner"><svg class="icon" viewBox="0 0 24 24"><rect x="5" y="11" width="14" height="9" rx="2"/><path d="M8 11V8a4 4 0 0 1 8 0v3"/></svg>
+  <div><b>Privacy by construction.</b> No audio, text or translation is sent to any external service.</div></div>
+```
+
+# Data quality assurance {background-color="#530153"}
+
+## Good audio is the foundation
+
+::: {.lede}
+AI can fix the transcriber's mistakes, but it **cannot recover what the microphone never captured**.
+:::
+
+```{=html}
+<svg class="dg" viewBox="0 0 1100 250" role="img" aria-label="Conceptual diagram: the recording sets a ceiling. With a poor recording, the ASR witnesses and the LLM judge stay low; with a good recording, the LLM judge can reach much higher. The judge recovers ASR errors only up to what the recording contains.">
+  <text class="k" x="20" y="16" style="font-size:13px">POOR RECORDING</text>
+  <text class="k" x="590" y="16" style="font-size:13px">GOOD RECORDING</text>
+  <line x1="20" y1="210" x2="510" y2="210" stroke="#E2E2E2" stroke-width="2"/>
+  <line x1="20" y1="128" x2="510" y2="128" stroke="#C0392B" stroke-width="2" stroke-dasharray="7 6"/>
+  <text class="s" x="510" y="118" text-anchor="end" style="fill:#C0392B;font-weight:700">ceiling set by the audio</text>
+  <rect x="40" y="128" width="110" height="82" rx="6" fill="#530153"/>
+  <rect x="200" y="160" width="110" height="50" rx="6" fill="#B974B9"/>
+  <rect x="360" y="131" width="110" height="79" rx="6" fill="#800280"/>
+  <text class="s" x="95" y="234" text-anchor="middle">Recording</text>
+  <text class="s" x="255" y="234" text-anchor="middle">ASR witnesses</text>
+  <text class="s" x="415" y="234" text-anchor="middle">LLM judge</text>
+  <line x1="590" y1="210" x2="1080" y2="210" stroke="#E2E2E2" stroke-width="2"/>
+  <line x1="590" y1="40" x2="1080" y2="40" stroke="#1E8F5B" stroke-width="2" stroke-dasharray="7 6"/>
+  <text class="s" x="1080" y="32" text-anchor="end" style="fill:#1E8F5B;font-weight:700">ceiling set by the audio</text>
+  <rect x="610" y="40" width="110" height="170" rx="6" fill="#530153"/>
+  <rect x="770" y="90" width="110" height="120" rx="6" fill="#B974B9"/>
+  <rect x="930" y="45" width="110" height="165" rx="6" fill="#800280"/>
+  <text class="s" x="665" y="234" text-anchor="middle">Recording</text>
+  <text class="s" x="825" y="234" text-anchor="middle">ASR witnesses</text>
+  <text class="s" x="985" y="234" text-anchor="middle">LLM judge</text>
+</svg>
+<div class="cap" style="margin-top:0.2em">Conceptual: bar heights show the idea, not measured values. The judge can recover ASR errors, but only up to the ceiling.</div>
+<div class="v banner"><svg class="icon" viewBox="0 0 24 24"><polyline points="2,12 5,12 7,6 9,18 11,9 13,15 15,11 17,13 19,12 22,12"/></svg>
+  <div>In our results, <b>about half of the rough segments trace back to the recording</b>. Better audio is the cheapest accuracy gain: no extra GPU, no bigger model.</div></div>
+```
+
+## Getting good audio in the field
+
+```{=html}
+<div class="v g3 field" style="font-size:0.72em">
+  <div class="node plain"><svg class="icon" viewBox="0 0 24 24" style="color:var(--base)"><rect x="9" y="3" width="6" height="11" rx="3"/><path d="M5 11a7 7 0 0 0 14 0M12 18v3"/></svg>
+    <span class="ttl">Mic close to the respondent</span><div>An external or clip-on mic beats the tablet's built-in one; keep it near the speaker's mouth.</div></div>
+  <div class="node plain"><svg class="icon" viewBox="0 0 24 24" style="color:var(--base)"><path d="M3 12h3l3-7 4 14 3-7h5"/></svg>
+    <span class="ttl">Set the gain, avoid clipping</span><div>Do a 10-second test before each interview; distorted peaks cannot be repaired later.</div></div>
+  <div class="node plain"><svg class="icon" viewBox="0 0 24 24" style="color:var(--base)"><path d="M4 9v6h4l5 4V5L8 9z"/><path d="M17 9l4 6M21 9l-4 6"/></svg>
+    <span class="ttl">Choose a quiet spot</span><div>Away from generators, traffic, crowds and wind; use a foam cover outdoors.</div></div>
+  <div class="node plain"><svg class="icon" viewBox="0 0 24 24" style="color:var(--base)"><rect x="4" y="4" width="16" height="16" rx="2"/><path d="M8 9h8M8 13h8M8 17h5"/></svg>
+    <span class="ttl">Keep the original file</span><div>Record at 16 kHz or more and never re-compress: our audio arrived as 8 kHz, ~12 kbps.</div></div>
+  <div class="node plain"><svg class="icon" viewBox="0 0 24 24" style="color:var(--base)"><circle cx="8" cy="12" r="4"/><circle cx="16" cy="12" r="4"/></svg>
+    <span class="ttl">Compare mics before fieldwork</span><div>Pilot two or three mics on the same interviews; <code>test-mics</code> ranks them.</div></div>
+  <div class="node qa"><svg class="icon" viewBox="0 0 24 24" style="color:var(--base)"><rect x="4" y="5" width="16" height="15" rx="2"/><path d="M4 10h16M9 3v4M15 3v4M8 15l2 2 4-4"/></svg>
+    <span class="ttl">Check every day's uploads</span><div>Run the quality report daily and give enumerators feedback while they are still in the field.</div></div>
+</div>
+<div class="v" style="display:grid;grid-template-columns:1fr 1fr;gap:0.8em;margin-top:0.8em">
+<div class="term sm"><div class="tb"><i style="background:#E06C75"></i><i style="background:#E5C07B"></i><i style="background:#98C379"></i><span>before fieldwork</span></div>
+<pre><code><span class="p">$</span> uv run asr-pipeline test-mics ./pilot -l ben</code></pre></div>
+<div class="term sm"><div class="tb"><i style="background:#E06C75"></i><i style="background:#E5C07B"></i><i style="background:#98C379"></i><span>every day</span></div>
+<pre><code><span class="p">$</span> just quality ./uploads/today</code></pre></div>
+</div>
+```
+
+## QA happens at three points
+
+```{=html}
+<div class="v lg sand">
+  <div class="c1"><div class="band"><span class="dot">B</span>Before</div>
+    <div class="body"><span class="ttl">Audio quality report</span>Score every recording; catch broken ones before spending GPU time on them.</div></div>
+  <div class="c2"><div class="band"><span class="dot">D</span>During · the only generative step</div>
+    <div class="body"><span class="ttl">Constrained generation</span>Temperature 0 and explicit rules: keep numbers exact, translate meaning, code-switch only on genuine English.</div></div>
+  <div class="c3"><div class="band"><span class="dot">A</span>After</div>
+    <div class="body"><span class="ttl">Guards + review worklist</span>Rules decide what ships and exactly which segments a human checks.</div></div>
+</div>
+<div class="v lg sand" style="margin-top:0.2em">
+  <span class="lab">rules · no AI</span><span class="lab" style="text-align:center">AI, tightly constrained</span><span class="lab" style="text-align:right">rules · no AI</span>
+</div>
+<div class="v banner light" style="margin-top:1.1em"><div>The AI produces the transcript. <b>Plain, auditable rules</b> decide whether to trust it.</div></div>
+```
+
+## Before: one command, one Excel report
+
+```{=html}
+<div class="v" style="display:grid;grid-template-columns:0.9fr 1.25fr;gap:1.1em;align-items:start">
+  <div>
+    <div class="term"><div class="tb"><i style="background:#E06C75"></i><i style="background:#E5C07B"></i><i style="background:#98C379"></i><span>terminal</span></div>
+<pre><code><span class="p">$</span> just quality ./interviews
+<span class="c"># → quality_report.xlsx</span></code></pre></div>
+    <div class="uses">
+      <div class="u"><svg class="icon" viewBox="0 0 24 24"><path d="M4 4h16v12H8l-4 4z"/></svg><span><b>Flag recordings</b> for re-interview</span></div>
+      <div class="u"><svg class="icon" viewBox="0 0 24 24"><path d="M5 12h14M13 6l6 6-6 6"/></svg><span><b>Skip unusable files</b> in the queue</span></div>
+      <div class="u"><svg class="icon" viewBox="0 0 24 24"><circle cx="12" cy="8" r="4"/><path d="M4 20c1.5-4 4.5-6 8-6s6.5 2 8 6"/></svg><span><b>Coach field teams</b> on mic setup</span></div>
+    </div>
+    <div class="cap">No GPU, no token needed: runs on any laptop, during collection.</div>
+  </div>
+  <div class="xl">
+    <div class="bar0"><i></i><i></i><i></i>&nbsp;quality_report.xlsx</div>
+    <table>
+      <tr><th>file</th><th>SNR</th><th>speech</th><th>score</th><th>quality</th></tr>
+      <tr><td class="mono">int_0412.m4a</td><td>27 dB</td><td>61%</td><td><span class="score">93</span></td><td><span class="flag f-ex">EXCELLENT</span></td></tr>
+      <tr><td class="mono">int_0413.m4a</td><td>21 dB</td><td>44%</td><td><span class="score">84</span></td><td><span class="flag f-gd">GOOD</span></td></tr>
+      <tr><td class="mono">int_0415.m4a</td><td>16 dB</td><td>31%</td><td><span class="score">61</span></td><td><span class="flag f-fr">FAIR</span></td></tr>
+      <tr><td class="mono">int_0418.m4a</td><td>12 dB</td><td>38%</td><td><span class="score">33</span></td><td><span class="flag f-po">POOR</span></td></tr>
+      <tr><td class="mono">int_0421.m4a</td><td>18 dB</td><td>40%</td><td><span class="score">42</span></td><td><span class="flag f-cl">CLIPPED</span></td></tr>
+      <tr><td class="mono">int_0427.m4a</td><td>7 dB</td><td>22%</td><td><span class="score">12</span></td><td><span class="flag f-bd">BAD</span></td></tr>
+    </table>
+  </div>
+</div>
+<div class="v cap" style="text-align:right">Illustrative rows. Ten flags in total, from EXCELLENT to BROKEN; thresholds are editable.</div>
+```
+
+## After: guards that refuse to fabricate
+
+```{=html}
+<div class="v guards g2" style="font-size:0.76em">
+  <div class="node qa"><span class="kick">Guard 1</span><span class="ttl">Number-abstain</span>
+    <p>A digit <b>neither witness heard</b> is blanked. Fabricated numbers never ship.</p>
+    <div class="xf"><span class="in">witnesses: <b>six</b><br>model: <b>60</b></span><span class="ar">→</span><span class="out"><code>[unclear]</code> + flag</span></div></div>
+  <div class="node qa"><span class="kick">Guard 2</span><span class="ttl">Foreign-script abstain</span>
+    <p>Characters outside Bengali + Latin (a stray Cyrillic or Devanagari word) are blanked.</p>
+    <div class="xf"><span class="in">«хозяйства»</span><span class="ar">→</span><span class="out"><code>[unclear]</code> + flag</span></div></div>
+  <div class="node qa"><span class="kick">Guard 3</span><span class="ttl">Witness disagreement</span>
+    <p>Output that drifts far from <b>both</b> witnesses goes to a human.</p>
+    <div class="xf"><span class="in">far from titu<br>far from Whisper</span><span class="ar">→</span><span class="out">⚑ review</span></div></div>
+  <div class="node qa"><span class="kick">Guard 4</span><span class="ttl">Greedy decoding</span>
+    <p>On near-empty segments, sampling <b>invented</b> plausible survey answers.</p>
+    <div class="xf"><span class="in">temperature 0.7<br><span class="bad">invents a turn</span></span><span class="ar">→</span><span class="out">temperature 0<br><span class="ok">stays grounded</span></span></div></div>
+</div>
+```
+
+## The review worklist: humans check only what matters
+
+```{=html}
+<div class="v wl" style="font-size:0.74em">
+  <div>
+    <span class="kick">One interview · 216 segments</span>
+    <div class="dots" id="wldots"></div>
+    <div class="cap">Illustrative. Purple dots are flagged segments; grey ones need no listening.</div>
+  </div>
+  <div>
+    <span class="ttl">A segment is flagged if it…</span>
+    <div class="trig">
+      <div class="t"><span class="dot">#</span><span>contains <b>any number</b></span></div>
+      <div class="t"><span class="dot">≠</span><span>has the two witnesses <b>disagreeing</b></span></div>
+      <div class="t"><span class="dot">?</span><span>contains text marked <b>[unclear]</b></span></div>
+    </div>
+    <div class="files">
+      <div class="f"><code>name.txt</code><span>Final transcript with roles</span></div>
+      <div class="f"><code>name.review.txt</code><span><b>QA worklist</b> with reasons</span></div>
+      <div class="f"><code>name.reasoning.txt</code><span>Judge's reasoning + witnesses</span></div>
+      <div class="f"><code>name.raw.txt</code><span>Pre-LLM transcript, for audit</span></div>
+    </div>
+  </div>
+</div>
+<div class="v banner light"><div>The audio ceiling cannot be removed locally. Instead of hiding it, the pipeline <b>shows exactly what to double-check</b>.</div></div>
+<script>
+(function(){var d=document.getElementById('wldots');if(!d||d.childElementCount)return;
+var f=[7,19,33,41,58,66,90,104,117,131,150,163,171,188,202,209];
+for(var i=0;i<216;i++){var e=document.createElement('i');if(f.indexOf(i)>-1)e.className='f';d.appendChild(e);}})();
+</script>
+```
+
+# Results {background-color="#530153"}
+
+## How usable are the transcripts?
+
+Coherence of the English output, 50 segments rated:
+
+::: {.bar}
+<div class="s1" style="width:56%">56% coherent</div><div class="s2 hatch" style="width:21%">≈21% audio-limited</div><div class="s2" style="width:21%">≈21% other</div><div class="s3" style="width:2%"></div>
+:::
+::: {.barbrace}
+<span style="margin-left:56%;width:42%">42% partial: gist clear, rough spans</span>
+:::
+
+::: {.barkey}
+<p><i style="background:var(--base)"></i>**Fully coherent (28/50)**: clean prose, e.g. "so many people's conditions worsen during floods"</p>
+<p><i class="hatch"></i>**Partial, audio-limited (≈ half of the 21)**: the recording is too degraded; no model can recover what was never captured</p>
+<p><i style="background:var(--light)"></i>**Partial, other**: a mistranslation, a transliteration, or an [unclear] on fair audio</p>
+<p><i style="background:var(--bad)"></i>**Garbled (1/50)**: largely incoherent</p>
+:::
+
+::: {.callout-note-custom}
+**≈ 98% usable for qualitative analysis.** Half of the rough segments are a **recording problem, not a model problem**: better field audio is the cheapest accuracy gain, which is why QA starts *before* transcription.
+:::
+
+## Key design decisions
+
+```{=html}
+<div class="v dec" style="font-size:0.76em">
+  <div class="d"><span class="dot fill">1</span><div><span class="ttl">Two independent witnesses</span><p>Sound vs structure: their errors cancel</p></div></div>
+  <div class="d"><span class="dot fill">2</span><div><span class="ttl">N-best fusion</span><p>Several readings let the judge choose from context</p></div></div>
+  <div class="d"><span class="dot fill">3</span><div><span class="ttl">An LLM judge, not a vote</span><p>Reconciles and translates with context</p></div></div>
+  <div class="d"><span class="dot fill">4</span><div><span class="ttl">Constrained prompt, temperature 0</span><p>Keeps numbers exact; no invented answers</p></div></div>
+  <div class="d"><span class="dot">5</span><div><span class="ttl">Deterministic guards</span><p>The model never has the last word on a number</p></div></div>
+  <div class="d"><span class="dot fill">6</span><div><span class="ttl">The LLM labels the roles</span><p>Enumerator vs respondent from what each speaker says, not voice</p></div></div>
+  <div class="d wide"><span class="dot">7</span><div><span class="ttl">Sequential model loading</span><p>Load → use → unload: the whole stack fits on one 8 GB laptop GPU</p></div></div>
+</div>
+```
+
+# Use it yourself {background-color="#530153"}
+
+## Running the pipeline
+
+```{=html}
+<div class="v">
+<div class="term"><div class="tb"><i style="background:#E06C75"></i><i style="background:#E5C07B"></i><i style="background:#98C379"></i><span>asr-pipeline</span></div>
+<pre><code><span class="c"># 1 · check audio quality first (no GPU needed)</span>
+<span class="p">$</span> just quality ./interviews
+
+<span class="c"># 2 · transcribe one interview (Bengali two-witness fusion)</span>
+<span class="p">$</span> just fusion interview.m4a -o ./outputs
+
+<span class="c"># 3 · a whole Survey Solutions folder (resume-safe)</span>
+<span class="p">$</span> just fusion-folder ./interviews
+
+<span class="c"># other languages: general multilingual path (e.g. Swahili)</span>
+<span class="p">$</span> uv run asr-pipeline transcribe interview.m4a -l swa</code></pre></div>
+<div class="stats">
+  <div class="stat"><span class="n">8 GB</span><span class="l">GPU is enough for the Bengali stack</span></div>
+  <div class="stat"><span class="n">~6 min</span><span class="l">to process a 5-minute clip on 8 GB</span></div>
+  <div class="stat"><span class="n">1,600+</span><span class="l">languages via the general multilingual path</span></div>
+</div>
+</div>
+```
+
+## Adapting it with your coding agent
+
+```{=html}
+<div class="v agent">
+  <div><span class="who">YOU → CODING AGENT</span>
+<div class="bubble">Clone github.com/noureini/asr-pipeline and read the README.
+
+1. Run the audio quality report on ./my_interviews and summarise how many files are POOR, BAD or CLIPPED, with file names.
+
+2. Find a phonetic (CTC) and a fluent (Whisper) model on Hugging Face for &lt;my language&gt;; list candidates.
+
+3. Propose a config based on fusion_production.yaml. Do not change the number-abstain guard.
+
+Ask before downloading any model larger than 2 GB.</div></div>
+  <div class="ann"><span class="who">WHY IT WORKS</span>
+    <div class="a"><span class="dot fill">1</span><div><b>Context first</b>: the README is the agent's memory file</div></div>
+    <div class="a"><span class="dot fill">2</span><div><b>Bounded tasks</b> with a concrete output</div></div>
+    <div class="a"><span class="dot">3</span><div><b>A fixed rule</b>: keep the guards, change the witnesses</div></div>
+    <div class="a"><span class="dot fill">4</span><div><b>A stop rule</b> before anything expensive</div></div>
+    <div class="node qa" style="margin-top:0.8em;padding:0.6em 0.8em">Validate on <b>20–30 segments</b> with a native speaker before scaling.</div>
+  </div>
+</div>
+```
+
+## Next steps: from pilot to production
+
+```{=html}
+<div class="v">
+<span class="status">✓ Pipeline complete and validated</span>
+<div class="road">
+  <div class="node hero"><span class="kick">Biggest lever</span><span class="ttl">16 GB GPU</span>
+    <p>Batched fusion: <b style="color:#fff">~1 hr → ~15 min</b> per interview</p><p>Fits Gemma-3-27B: better number faithfulness</p></div>
+  <div class="arrowcol">→</div>
+  <div class="node"><span class="kick">Operations</span><span class="ttl">Batch processing</span><p>All interviews, unattended</p></div>
+  <div class="arrowcol">→</div>
+  <div class="node qa"><span class="kick">Quality</span><span class="ttl">Human-in-the-loop QA</span><p>Analysts verify flagged numbers against the audio</p></div>
+  <div class="arrowcol">→</div>
+  <div class="node dash"><span class="kick">Optional</span><span class="ttl">Frontier benchmark</span><p>Private spot-check of the open-source output</p></div>
+</div>
+<div class="banner light"><div>What remains is <b>hardware and operations</b>, not research.</div></div>
+</div>
+```
+
+## Key takeaways
+
+```{=html}
+<div class="v tk" style="font-size:0.86em">
+  <div class="r"><span class="dot fill">1</span><div><span class="ttl">Never trust a single model on hard audio.</span> <span class="x">Use independent "witnesses" whose errors differ.</span></div></div>
+  <div class="r"><span class="dot fill">2</span><div><span class="ttl">Give the LLM evidence, not freedom.</span> <span class="x">Several hypotheses, tight rules, temperature 0.</span></div></div>
+  <div class="r"><span class="dot">3</span><div><span class="ttl">Let rules, not AI, decide what ships.</span> <span class="x">Numbers no witness heard are blanked, never guessed.</span></div></div>
+  <div class="r"><span class="dot">4</span><div><span class="ttl">Good audio is the foundation.</span> <span class="x">Half the rough output is a recording problem: fix it in the field, check it daily.</span></div></div>
+  <div class="r"><span class="dot">5</span><div><span class="ttl">Point humans to the few segments that matter.</span> <span class="x">The worklist makes review targeted and auditable.</span></div></div>
+</div>
+```
+
+## Thank you {.closing}
+
+[noureini.sayouti@gmail.com](mailto:noureini.sayouti@gmail.com)
+
+[github.com/noureini/asr-pipeline](https://github.com/noureini/asr-pipeline)

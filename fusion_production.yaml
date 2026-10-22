@@ -4,8 +4,8 @@
 # The validated, fully-local, fully-open, hallucination-resistant stack:
 #
 #   titu (CTC, phonetic)  ‖  Whisper-regional (seq2seq, CT2, fluent)  2 witnesses
-#     → Gemma-3-12B-it UD-Q4 reconciles into clean Bengali [bn] AND
-#       translates to English [en] in ONE call (Gemma [en] A/B-validated faithful)
+#     → Gemma-3-12B-it UD-Q4 reconciles into clean Bengali [bn], translates to
+#       English [en] AND labels each turn ENUMERATOR / RESPONDENT in ONE call
 #
 # titu is the primary engine (Stage 3, gives the .raw.txt). Whisper runs as
 # the second witness inside the fusion stage (Stage 6). Recovers semantic
@@ -25,8 +25,9 @@ pipeline:
 titu:
   # Witness #1 model. fastconformer = validated default (complements dialectal
   # Whisper in fusion). conformer_large = A/B (more dialect/content). See
-  # scripts/ab_titu_variants.py.
+  # the archive/experiments branch (scripts/ab_titu_variants.py).
   model_id: "hishab/titu_stt_bn_fastconformer"
+  revision: "993316b17c3db56a42bf0140b8ad524f35b4677b"   # pinned HF commit
   batch_size: 8
 
 preprocessing:
@@ -47,11 +48,11 @@ preprocessing:
     enabled: false
 
 diarization:
-  backend: "pyannote"
-  model: "pyannote/speaker-diarization-community-1"  # 2025 exclusive pipeline (Stage 4, A/B 2026-06-25)
-  min_speakers: 2                 # survey floor: always enumerator + respondent
-  max_speakers: 4                 # allow up to 2 extra voices; cap blocks noise over-splitting
-  min_segment_duration: 0.5
+  # OFF by design: no voice clustering. The fusion LLM (Stage 6b) labels each
+  # turn ENUMERATOR / RESPONDENT from what is said, and splits a segment that
+  # holds both a question and its answer. (The multilingual path keeps
+  # pyannote diarization — see src/asr_pipeline/default.yaml.)
+  enabled: false
 
 alignment:
   # OFF by design: titu emits native CTC word timestamps (validated CLEAN —
@@ -62,15 +63,17 @@ alignment:
   enabled: false                 # forced alignment disabled (titu CTC times used directly)
 
 # ---------------------------------------------------------------------------
-# Stage 6: two-witness fusion + dedicated NMT translation
+# Stage 6: two-witness fusion + translation + speaker roles (one Gemma call)
 # ---------------------------------------------------------------------------
 postprocessing:
   translation_backend: "fusion"
   fusion:
     whisper_model: "bengaliAI/tugstugi_bengaliai-regional-asr_whisper-medium"
+    whisper_revision: "bc519b95ac986f4c732972320052fa1b2c217e8a"   # pinned HF commit
     whisper_ct2_path: "models/tugstugi_ct2"   # CT2 batched N-best (~1.9x); HF fallback if missing
     gguf_repo: "unsloth/gemma-3-12b-it-GGUF"
     gguf_file: "gemma-3-12b-it-UD-Q4_K_XL.gguf"
+    gguf_revision: "d15e4c7dc21dc55d56bf8549db57a71ad8a2a35d"     # pinned HF commit
     gguf_n_gpu_layers: -1        # all on GPU (12B Q4 fits 8GB)
     # ── generation hyperparameters ──
     # temp=0 (GREEDY) — chosen on EVIDENCE, not the Gemma-rec default (1.0).
@@ -105,9 +108,8 @@ postprocessing:
     ger_guard: true
     ger_snap: false        # observe-mode first → calibrate ger_snap_tau
     ger_snap_tau: 0.72     # set from scripts/ger_calibrate.py, then ger_snap: true
-    # Roles now come from Stage-5 word-level speaker attribution
-    # (titu CTC word timestamps → speaker-pure segments → cluster→role
-    # mapping). The per-segment LLM role stage was removed.
+    # Roles: labelled per turn inside this same fusion call (@ENUMERATOR /
+    # @RESPONDENT, see config/prompts/bn_survey.yaml). No diarization.
     # ── fusion backend ──
     # "server" continuous batching only helps a SMALL model that leaves
     # VRAM for KV slots (4B/8B). The 12B fills 8GB and PAGES with slots
