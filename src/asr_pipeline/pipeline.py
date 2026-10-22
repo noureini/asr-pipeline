@@ -47,6 +47,7 @@ from asr_pipeline.models import (
     ASRSegment,
     AudioChunk,
     AudioQualityMetrics,
+    DiarizationResult,
     LanguageTier,
     NonSpeechSegment,
     ProcessedSegment,
@@ -204,15 +205,15 @@ class ASRPipeline:
                     asr_segments = self._dedup_overlap_words(asr_segments)
 
                 # ── Stage 5: Alignment ───────────────────────────
-                # Word-level speaker attribution → speaker-pure segments
-                # (still labelled by diarization cluster SPEAKER_xx). The
-                # cluster→role decision (ENUMERATOR / RESPONDENT) is made
-                # once inside the fusion stage by an LLM classifier, where
-                # Gemma is already loaded — so the raw transcript shows the
-                # honest pre-LLM clusters.
-                with stage_log("5", "Alignment", "Word-level speaker attribution"):
+                # With diarization: word-level speaker attribution →
+                # speaker-pure segments (SPEAKER_xx). Without it (Bengali
+                # fusion): one segment per VAD chunk, NOT merged — the fusion
+                # LLM labels each turn ENUMERATOR / RESPONDENT, so the raw
+                # transcript carries no speaker labels yet.
+                with stage_log("5", "Alignment", "Segments for post-processing"):
                     aligned = align_segments(asr_segments, diarization_result)
-                    aligned = merge_consecutive_segments(aligned)
+                    if self._config.diarization.enabled:
+                        aligned = merge_consecutive_segments(aligned)
 
                 # ── Stage 5b: Raw transcript snapshot ──────────
                 # Save a transcript built ONLY from titu + diarization
@@ -265,9 +266,14 @@ class ASRPipeline:
 
                 # ── Stage 7: Output ──────────────────────────────
                 with stage_log("7", "Output", "Formatting and writing transcript"):
+                    num_speakers = (
+                        diarization_result.num_speakers
+                        if self._config.diarization.enabled
+                        else len({s.speaker_id for s in processed})
+                    )
                     result = self._build_result(
                         audio_path, language, engine_name, processed,
-                        diarization_result.num_speakers, project_name,
+                        num_speakers, project_name,
                         non_speech_regions,
                     )
                     written_files: list[Path] = []
@@ -442,8 +448,22 @@ class ASRPipeline:
 
         parallel_start = time.perf_counter()
 
-        if True:  # phoneme_first engine removed \u2014 standard path only
-            # \u2500\u2500 Standard: transcription + diarization in parallel \u2500\u2500
+        if not self._config.diarization.enabled:
+            # Bengali fusion path: no voice clustering — the fusion LLM
+            # labels ENUMERATOR / RESPONDENT from what is said.
+            console.rule("[stage]Stage 3: Transcription[/stage]", style="cyan")
+            logger.info("  Diarization disabled — roles are labelled by "
+                        "the fusion LLM")
+            asr_segments = self._run_transcription(
+                chunks, language, engine_name, omni_lang, wav_path)
+            logger.info(
+                f"[success]\u2713 Stage 3 completed[/success] "
+                f"in {time.perf_counter() - parallel_start:.1f}s"
+            )
+            return asr_segments, DiarizationResult(num_speakers=0, segments=[])
+
+        if True:  # phoneme_first engine removed — standard path only
+            # ── Standard: transcription + diarization in parallel ──
             console.rule(
                 "[stage]Stages 3 & 4: Transcription + Diarization (parallel)[/stage]",
                 style="cyan",

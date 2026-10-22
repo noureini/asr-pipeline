@@ -4,8 +4,8 @@
 # The validated, fully-local, fully-open, hallucination-resistant stack:
 #
 #   titu (CTC, phonetic)  ‖  Whisper-regional (seq2seq, CT2, fluent)  2 witnesses
-#     → Gemma-3-12B-it UD-Q4 reconciles into clean Bengali [bn] AND
-#       translates to English [en] in ONE call (Gemma [en] A/B-validated faithful)
+#     → Gemma-3-12B-it UD-Q4 reconciles into clean Bengali [bn], translates to
+#       English [en] AND labels each turn ENUMERATOR / RESPONDENT in ONE call
 #
 # titu is the primary engine (Stage 3, gives the .raw.txt). Whisper runs as
 # the second witness inside the fusion stage (Stage 6). Recovers semantic
@@ -47,11 +47,11 @@ preprocessing:
     enabled: false
 
 diarization:
-  backend: "pyannote"
-  model: "pyannote/speaker-diarization-community-1"  # 2025 exclusive pipeline (Stage 4, A/B 2026-06-25)
-  min_speakers: 2                 # survey floor: always enumerator + respondent
-  max_speakers: 4                 # allow up to 2 extra voices; cap blocks noise over-splitting
-  min_segment_duration: 0.5
+  # OFF by design: no voice clustering. The fusion LLM (Stage 6b) labels each
+  # turn ENUMERATOR / RESPONDENT from what is said, and splits a segment that
+  # holds both a question and its answer. (The multilingual path keeps
+  # pyannote diarization — see src/asr_pipeline/default.yaml.)
+  enabled: false
 
 alignment:
   # OFF by design: titu emits native CTC word timestamps (validated CLEAN —
@@ -62,7 +62,7 @@ alignment:
   enabled: false                 # forced alignment disabled (titu CTC times used directly)
 
 # ---------------------------------------------------------------------------
-# Stage 6: two-witness fusion + dedicated NMT translation
+# Stage 6: two-witness fusion + translation + speaker roles (one Gemma call)
 # ---------------------------------------------------------------------------
 postprocessing:
   translation_backend: "fusion"
@@ -105,9 +105,8 @@ postprocessing:
     ger_guard: true
     ger_snap: false        # observe-mode first → calibrate ger_snap_tau
     ger_snap_tau: 0.72     # set from scripts/ger_calibrate.py, then ger_snap: true
-    # Roles now come from Stage-5 word-level speaker attribution
-    # (titu CTC word timestamps → speaker-pure segments → cluster→role
-    # mapping). The per-segment LLM role stage was removed.
+    # Roles: labelled per turn inside this same fusion call (@ENUMERATOR /
+    # @RESPONDENT, see config/prompts/bn_survey.yaml). No diarization.
     # ── fusion backend ──
     # "server" continuous batching only helps a SMALL model that leaves
     # VRAM for KV slots (4B/8B). The 12B fills 8GB and PAGES with slots

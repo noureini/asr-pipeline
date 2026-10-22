@@ -97,10 +97,20 @@ code-switches (NGO, loan, bank name) in Latin. If unsure whether a word is \
 English, write it in Bengali. For an unclear Bengali word, keep it in \
 Bengali script or mark [অস্পষ্ট].
 
+ROLES: label each speaker turn from WHAT IS SAID. ENUMERATOR = the \
+interviewer: asks the survey questions, reads the consent/recording \
+script, gives instructions, probes. RESPONDENT = the interviewee: answers, \
+describing their own family, livelihood, age, floods, crops, money, land. \
+Most utterances are one turn. When the utterance holds a question AND its \
+answer, write two turns in spoken order, splitting only where the speaker \
+changes and keeping every word in exactly one turn.
+
 Output a strippable <think> block (1–2 short sentences, no more), then \
-exactly two lines:
-<think> who is plausibly speaking + what's asked/answered; any content \
-word you overrode and why — keep it to 1–2 short sentences </think>
+one labelled turn per speaker, each turn exactly three lines:
+<think> who is speaking + what's asked/answered (and where the turn \
+changes, if it does); any content word you overrode and why — keep it to \
+1–2 short sentences </think>
+@ENUMERATOR or @RESPONDENT
 [bn] clean coherent Bengali reconciling both readings; unrecoverable → \
 [অস্পষ্ট]
 [en] natural meaning-faithful English of YOUR [bn]; render it entirely in \
@@ -114,25 +124,7 @@ LITERAL: $literal
 FLUENT (candidate readings): $fluent"""
 
 
-# One-shot cluster→role classifier. Reads each diarized speaker's aggregated
-# Bengali and decides who is the interviewer. Runs ONCE per interview (not
-# per segment) and only outputs a single letter — it never rewrites text, so
-# it cannot fabricate. Replaces the unreliable consent-keyword / most-speech
-# heuristic (keywords are English ASCII but titu writes Bengali script).
-_ROLE_CLASSIFY_PROMPT = """\
-This is a survey interview from a climate-risk study in coastal Bangladesh.
-Exactly one speaker is the ENUMERATOR (the interviewer: ASKS the survey
-questions, reads the consent/recording script, gives instructions, probes —
-e.g. "what is...?", "do you...?", "tell me about...", asks name/age/household).
-The other speaker(s) are the RESPONDENT (the interviewee: ANSWERS, describing
-their OWN life — family, livelihood, age, floods, crops, money, land).
-
-Below is each speaker's transcribed Bengali (their lines concatenated):
-
-$speakers
-
-Which speaker is the ENUMERATOR (the one ASKING questions and reading the
-consent script)? Answer with EXACTLY ONE letter ($letters) and nothing else."""
+_ROLES = ("ENUMERATOR", "RESPONDENT")
 
 
 def load_prompts(prompts_file: Optional[str]) -> dict:
@@ -326,7 +318,7 @@ class FusionTranslator:
         self._n_parallel = n_parallel
         self._server_port = server_port
         # Generation hyperparameters (Gemma-team config + fixed seed →
-        # reproducible). The cluster→role classifier overrides to greedy.
+        # reproducible). Production runs greedy (temperature 0).
         self._temperature = temperature
         self._top_p = top_p
         self._top_k = top_k
@@ -599,53 +591,20 @@ class FusionTranslator:
         return "\n".join(f"  ({chr(97 + j)}) {h}"
                          for j, h in enumerate(whyps))
 
-    # ── one-shot cluster→role classification (replaces the heuristic) ──
-    def _decide_roles(self, aligned: list[AlignedSegment], gen_fn) -> dict:
-        """Decide {SPEAKER_xx: ENUMERATOR|RESPONDENT} once for the interview.
-
-        Primary: ONE LLM call reading each cluster's aggregated Bengali
-        (works on Bengali script, unlike the ASCII consent-keyword match).
-        Fallback: the heuristic `decide_role_map` if the call fails / is
-        ambiguous. `gen_fn(prompt) -> str` is the backend's generate.
-        """
-        from collections import defaultdict
-        from asr_pipeline.alignment import decide_role_map
-
-        texts: dict[str, list[str]] = defaultdict(list)
-        for s in aligned:
-            if (s.raw_text or "").strip():
-                texts[s.speaker_id].append(s.raw_text.strip())
-        clusters = sorted(texts.keys())
-
-        if len(clusters) < 2:
-            return decide_role_map(aligned)   # single cluster / empty
-
-        letters = [chr(ord("A") + i) for i in range(len(clusters))]
-        blocks = "\n\n".join(
-            f"Speaker {L} ({c}):\n{' '.join(texts[c])[:900]}"
-            for L, c in zip(letters, clusters))
-        from string import Template
-        prompt = Template(_ROLE_CLASSIFY_PROMPT).safe_substitute(
-            speakers=blocks, letters="/".join(letters))
-        try:
-            reply = gen_fn(prompt) or ""
-        except Exception as ex:
-            logger.warning("  role classify call failed (%s) — heuristic "
-                           "fallback", type(ex).__name__)
-            return decide_role_map(aligned)
-
-        pick = next((ch for ch in reply if ch in letters), None)
-        if pick is None:
-            logger.warning("  role classify gave no clear answer (%r) — "
-                           "heuristic fallback", reply.strip()[:40])
-            return decide_role_map(aligned)
-
-        enum = clusters[letters.index(pick)]
-        mapping = {c: ("ENUMERATOR" if c == enum else "RESPONDENT")
-                   for c in clusters}
-        logger.info("  ✓ Roles (LLM classifier): %s → ENUMERATOR; "
-                    "%d cluster(s) → RESPONDENT", enum, len(clusters) - 1)
-        return mapping
+    def _finish_segment(self, i: int, ans: str, meta: dict, titu: str,
+                        whyps: list[str], error: str = "") -> list[tuple]:
+        """Parse one fusion reply into role-labelled turns, record it, and
+        run the GER guard. A reply with no usable turn (error, <think>
+        overrun) falls back to one FLUENT-raw turn so the segment never
+        vanishes. Returns the final [(role, bn, en), …]."""
+        wt = whyps[0] if whyps else ""
+        think, turns = _parse_fusion(ans) if not error else ("", [])
+        self._record_fusion(i, think, turns, meta, wt, error=error)
+        if not any((t[1] or "").strip() for t in turns):
+            turns = [(None, wt, "")]
+        turns = self._apply_ger(i, turns, titu, whyps)
+        self._fusion_turns[i] = turns
+        return turns
 
     def _run_fusion(self, aligned: list[AlignedSegment],
                     titu_texts: list[str],
@@ -683,12 +642,6 @@ class FusionTranslator:
             logger.warning("  fusion judge unavailable — falling back to "
                            "titu text unchanged (no translation)")
             return list(titu_texts), [""] * len(titu_texts)
-        # Decide cluster→role ONCE (Gemma is loaded) before per-segment work.
-        # GREEDY (temp=0) — a single-letter classification must be deterministic,
-        # not sampled (validated: greedy picks the enumerator reliably).
-        self._cluster_role_map = self._decide_roles(
-            aligned, lambda p: proc.generate(
-                p, temperature=0.0, top_p=1.0, max_tokens=8))
         bn_out, en_out = [], []
         for i, (tt, whyps) in enumerate(zip(titu_texts, whisper_nbest)):
             tt = (tt or "").strip()
@@ -705,30 +658,23 @@ class FusionTranslator:
             prompt = tpl.safe_substitute(literal=tt or "(none)",
                                          fluent=self._fmt_fluent(whyps))
             try:
-                # [bn] + [en] + reasoning in one call; meta carries the
-                # truncation signal (finish_reason) and output token count.
+                # role-labelled [bn] + [en] turns + reasoning in one call;
+                # meta carries the truncation signal (finish_reason) and
+                # output token count.
                 ans, meta = proc.generate(
                     prompt, temperature=self._temperature,
                     top_p=self._top_p, top_k=self._top_k,
                     min_p=self._min_p, repeat_penalty=self._repeat_penalty,
                     seed=self._seed, max_tokens=self._fusion_max_tokens,
                     return_meta=True)
-                think, turns = _parse_fusion(ans)
-                self._record_fusion(i, think, turns, meta, wt)
-                # never emit empty: no parseable turn means the LLM gave no
-                # usable reading (often a <think> overrun) — process() falls
-                # back to the FLUENT raw line so the segment never vanishes.
-                bn = (turns[0][1] if turns else "") or wt
-                en = turns[0][2] if turns else ""
+                turns = self._finish_segment(i, ans, meta, tt, whyps)
             except Exception as ex:
                 logger.warning("  fusion seg %d failed: %s", i,
                                type(ex).__name__)
-                self._record_fusion(i, "", [], {}, wt,
-                                    error=type(ex).__name__)
-                bn, en = wt, ""
-            bn, en = self._apply_ger(i, bn, en, tt, whyps)
-            bn_out.append(bn)
-            en_out.append(en)
+                turns = self._finish_segment(i, "", {}, tt, whyps,
+                                             error=type(ex).__name__)
+            bn_out.append(" ".join(t[1] for t in turns if t[1]))
+            en_out.append(" ".join(t[2] for t in turns if t[2]))
             if (i + 1) % 25 == 0:
                 logger.info("    fused+translated %d/%d", i + 1,
                             len(titu_texts))
@@ -743,15 +689,6 @@ class FusionTranslator:
     # ── server-backed (parallel / continuous-batching) fusion + roles ─
     def _run_fusion_server(self, server, aligned, titu_texts, whisper_nbest):
         from string import Template
-        # Decide cluster→role ONCE via the server (one short request).
-        # GREEDY (temp=0) — a single-letter classification must be deterministic
-        # regardless of the fusion sampling temperature (mirrors the in-process
-        # path). Do NOT use self._temperature here: at Gemma-rec temp=1.0 it
-        # would sample the role pick.
-        self._cluster_role_map = self._decide_roles(
-            aligned, lambda p: (server.generate_batch(
-                [p], max_tokens=8, temperature=0.0,
-                top_p=1.0) or [""])[0])
         tpl = Template(self._fusion_prompt)
         n = len(titu_texts)
         bn_out, en_out = [""] * n, [""] * n
@@ -774,16 +711,13 @@ class FusionTranslator:
             prompts, max_tokens=self._fusion_max_tokens,
             temperature=self._temperature, top_p=self._top_p)
         for j, ans in zip(idxs, answers):
-            wt = whisper_nbest[j][0] if whisper_nbest[j] else ""
-            think, turns = _parse_fusion(ans)
             # server path has no per-request finish_reason → no truncation
             # signal, but the empty→FLUENT coverage save still applies.
-            self._record_fusion(j, think, turns, {}, wt)
-            bn = (turns[0][1] if turns else "") or wt
-            en = turns[0][2] if turns else ""
-            bn, en = self._apply_ger(j, bn, en, titu_texts[j], whisper_nbest[j])
-            bn_out[j] = bn
-            en_out[j] = en
+            whyps = [h.strip() for h in (whisper_nbest[j] or [])
+                     if h and h.strip()]
+            turns = self._finish_segment(j, ans, {}, titu_texts[j], whyps)
+            bn_out[j] = " ".join(t[1] for t in turns if t[1])
+            en_out[j] = " ".join(t[2] for t in turns if t[2])
         self._log_ger_summary(n)
         return bn_out, en_out
 
@@ -833,24 +767,26 @@ class FusionTranslator:
         self._fusion_truncated: set[int] = set()  # hit the token cap
         self._fusion_en_empty: set[int] = set()   # bn ok but no English
         self._fusion_tokens: list[int] = []       # output-token sizes
-        # cluster (SPEAKER_xx) → ENUMERATOR/RESPONDENT, decided once per
-        # interview by the LLM classifier (heuristic fallback if it fails).
-        self._cluster_role_map: dict[str, str] = {}
         # GER guard: per-segment reasons, snapped set, and the (min_dist,
         # witness_agree) metrics that calibrate snap_tau.
         self._ger_reasons: dict[int, list] = {}
         self._ger_snapped: set[int] = set()
         self._ger_metrics: dict[int, tuple] = {}
 
-    def _apply_ger(self, i: int, bn: str, en: str, titu: str,
-                   whyps: list[str]) -> tuple[str, str]:
-        """Constrain one fused [bn] against its witness pool: closest-to-
-        N-best snap (when enabled + calibrated), fabricated-number abstain,
-        and agreement/number flags for the review worklist. Records the
-        distance metrics for calibration. No-op when the guard is disabled."""
-        if not self._ger_enabled or not (bn or "").strip():
-            return bn, en
+    def _apply_ger(self, i: int, turns: list[tuple], titu: str,
+                   whyps: list[str]) -> list[tuple]:
+        """Constrain one fused segment against its witness pool: closest-to-
+        N-best snap (when enabled + calibrated), fabricated-number and
+        foreign-script abstain, and agreement flags for the review worklist.
+        The witnesses cover the WHOLE segment, so distances and flags are
+        measured on all turns joined; the abstain rewrites are then applied
+        turn by turn so a question/answer split survives the guard. Records
+        the distance metrics for calibration. No-op when disabled."""
+        bn = " ".join(t[1] for t in turns if t[1])
+        if not self._ger_enabled or not bn.strip():
+            return turns
         from asr_pipeline import ger_guard
+        en = " ".join(t[2] for t in turns if t[2])
         v = ger_guard.assess(
             bn, en, titu, whyps,
             snap=self._ger_snap, snap_tau=self._ger_snap_tau)
@@ -860,12 +796,16 @@ class FusionTranslator:
         if v.reasons:
             self._ger_reasons[i] = v.reasons
         if v.snapped:
+            # the snapped witness is one undivided reading → one turn
             self._ger_snapped.add(i)
-        # If the guard changed the text (snap or number-abstain), keep the
-        # recorded turn in sync so process() emits the guarded version.
-        if (v.bn, v.en) != (bn, en):
-            self._fusion_turns[i] = [(None, v.bn, v.en)]
-        return v.bn, v.en
+            return [(turns[0][0], v.bn, v.en)]
+        if (v.bn, v.en) == (bn, en):
+            return turns
+        guarded = []
+        for role, tbn, ten in turns:
+            vt = ger_guard.assess(tbn, ten, titu, whyps, snap=False)
+            guarded.append((role, vt.bn, vt.en))
+        return guarded
 
     def _log_ger_summary(self, n: int) -> None:
         """One-line GER-guard summary for the run (next to fusion coverage).
@@ -986,15 +926,17 @@ class FusionTranslator:
             fused_bn, english = self._run_fusion(
                 aligned, titu_texts, whisper_nbest)
 
-        # One clean ProcessedSegment per fusion segment (fusion only
-        # transcribes/translates now — no roles, no splitting). Roles +
-        # within-segment splitting are done next by the structured role
-        # stage, which has the whole-transcript context. The placeholder
-        # role here is overwritten there.
+        # One ProcessedSegment per role-labelled turn. The fusion call reads
+        # WHAT IS SAID and tags each turn @ENUMERATOR / @RESPONDENT, splitting
+        # a segment that holds both a question and its answer — no voice
+        # clustering. The decision is in the <think> trace (.reasoning.txt).
         if server is not None:
             server.stop()
         processed = []
         sid = 0
+        # An untagged turn (fallback / pass-through) continues the previous
+        # speaker; the interview opens with the enumerator (consent script).
+        last_role = "ENUMERATOR"
         for i, (seg, bn0, en0, whyps) in enumerate(
                 zip(aligned, fused_bn, english, whisper_nbest)):
             wt = whyps[0] if whyps else ""   # top whisper hyp for QA flag
@@ -1006,17 +948,10 @@ class FusionTranslator:
             fellback = i in self._fusion_fallback
             truncated = i in self._fusion_truncated
             think = self._fusion_think.get(i, "")
-            for k, ((_role, bn, en), (s0, s1)) in enumerate(zip(turns, spans)):
-                # Role = the segment's diarization cluster mapped through the
-                # ONE-TIME LLM cluster→role decision (made above, before the
-                # loop). Segments are speaker-pure (Stage-5 word-level
-                # attribution), so a cluster→role map is all that's needed —
-                # no per-segment guessing, no Q/A alternation, no fabrication.
-                role = self._cluster_role_map.get(seg.speaker_id)
-                if role not in ("ENUMERATOR", "RESPONDENT"):
-                    role = (seg.speaker_id
-                            if seg.speaker_id in ("ENUMERATOR", "RESPONDENT")
-                            else "RESPONDENT")
+            for k, ((role, bn, en), (s0, s1)) in enumerate(zip(turns, spans)):
+                if role not in _ROLES:
+                    role = last_role
+                last_role = role
                 review, reason = self._review_flag(seg.raw_text, wt, bn, en)
                 if fellback or truncated:
                     review = True
@@ -1066,9 +1001,6 @@ class FusionTranslator:
         logger.info("  review flags: %d/%d segments need human QA",
                     n_flag, len(processed))
         self._log_fusion_coverage(aligned)
-        # Roles are already set from Stage-5 word-level speaker attribution
-        # (speaker-pure segments + cluster→role mapping). The old per-segment
-        # LLM role-attribution stage has been removed.
         return processed
 
     @staticmethod

@@ -183,6 +183,9 @@ class NemoMsddConfig(BaseModel):
 
 
 class DiarizationConfig(BaseModel):
+    # Voice diarization (speaker clusters). The Bengali fusion path turns it
+    # OFF: the fusion LLM labels ENUMERATOR / RESPONDENT from what is said.
+    enabled: bool = True
     backend: Literal["pyannote", "nemo_msdd"] = "pyannote"
     # community-1 (2025) is the actively-maintained pyannote pipeline: exclusive
     # frame-level diarization + stronger on noisy/multi-speaker audio. Ties 3.1
@@ -383,10 +386,8 @@ class FusionConfig(BaseModel):
     # clobbers good reconciliations. (Number-abstain + flags work regardless.)
     ger_snap: bool = False
     ger_snap_tau: float = 0.72      # CALIBRATE from your slice before trusting
-    # Roles (ENUMERATOR / RESPONDENT) now come from Stage-5 word-level
-    # speaker attribution (titu CTC word timestamps → speaker-pure segments
-    # → one-time cluster→role mapping in alignment.map_speakers_to_roles).
-    # The old per-segment LLM role-attribution stage has been removed.
+    # Roles (ENUMERATOR / RESPONDENT) are labelled per turn inside the
+    # fusion call, from what is said (no diarization on this path).
     # ── Prompt templates (operational config, not code) ───────────────
     # Path (relative to repo root or absolute) to the YAML holding
     # `fusion_prompt`. Built-in default is used if the file is missing,
