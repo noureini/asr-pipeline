@@ -464,7 +464,7 @@ def check_deps() -> None:
         ("faster_whisper", "Whisper ASR engine (witness 2)"),
         ("llama_cpp", "Gemma GGUF judge (llama.cpp)"),
         ("silero_vad", "Voice activity detection"),
-        ("omnilingual_asr", "Omnilingual ASR engine"),
+        ("omnilingual_asr", "Omnilingual ASR (optional extra)"),
         ("pyannote.audio", "Speaker diarization"),
         ("transformers", "NLLB-200 tokenizer"),
         ("ctranslate2", "CTranslate2 translation"),

@@ -94,7 +94,7 @@ several dependencies only ship working Linux builds:
   prebuilt-wheel index that `pyproject.toml` enables only for
   `sys_platform == 'linux'`. Elsewhere you get the CPU build, which is far too
   slow.
-- **fairseq2** (used by `omnilingual-asr`, general path) ships Linux wheels only.
+- **fairseq2** (used by the optional `omnilingual-asr` extra, general path) ships Linux wheels only.
 - The `justfile` recipes are written for bash.
 
 macOS installs the CPU builds; it works for the unit tests but is not
@@ -115,7 +115,7 @@ practical for real interviews.
 |---|---|---|
 | `git` | clone the repo | `sudo apt install git` |
 | `ffmpeg` | decode m4a/mp3, resample | `sudo apt install ffmpeg` |
-| `build-essential`, `zlib1g-dev`, `libbz2-dev`, `liblzma-dev` | C/C++ compiler and headers to build `kenlm` (pulled in by `omnilingual-asr`), which has no prebuilt wheel | `sudo apt install build-essential zlib1g-dev libbz2-dev liblzma-dev` |
+| `build-essential`, `zlib1g-dev`, `libbz2-dev`, `liblzma-dev` | **Only for the optional multilingual extra:** a C/C++ compiler and headers to build `kenlm` (pulled in by `omnilingual-asr`), which has no prebuilt wheel. The Bengali pipeline does not need them. | `sudo apt install build-essential zlib1g-dev libbz2-dev liblzma-dev` |
 | [`uv`](https://docs.astral.sh/uv/) | Python + dependency manager; installs the exact locked versions | `curl -LsSf https://astral.sh/uv/install.sh \| sh` |
 | [`just`](https://github.com/casey/just) | task runner (`just fusion …`) | `uv tool install rust-just` |
 
@@ -146,7 +146,7 @@ nvidia-smi
 **2. Install the system tools:**
 
 ```bash
-sudo apt update && sudo apt install -y git ffmpeg build-essential zlib1g-dev libbz2-dev liblzma-dev
+sudo apt update && sudo apt install -y git ffmpeg
 curl -LsSf https://astral.sh/uv/install.sh | sh
 source ~/.bashrc
 uv tool install rust-just
@@ -266,7 +266,7 @@ All are declared in `pyproject.toml` and locked in `uv.lock`.
 | `openpyxl` | Writes `quality_report.xlsx` |
 | `pyannote.audio<4`, `speechbrain` | Per-speaker quality report and the general path's diarization. Pinned < 4 because pyannote 4 needs numpy 2, which fairseq2 does not support yet. |
 | **General multilingual path** | |
-| `omnilingual-asr` | ASR for 1,600+ languages (pulls fairseq2) |
+| `omnilingual-asr` (extra `multilingual`) | ASR for 1,600+ languages. Pulls fairseq2 and kenlm (needs a compiler). Not installed by default. |
 | `sentencepiece` | NLLB tokenizer (`ct2_nllb` translation backend) |
 | `bitsandbytes` | 4/8-bit loading for the HF translation backends |
 | `ollama` | Client for the optional Ollama refinement backend |
@@ -318,10 +318,14 @@ For languages other than Bengali, the pipeline uses a single ASR engine
 others), pyannote diarization, and a local LLM for correction/translation.
 This path does not have the two-witness fusion or the review worklist.
 
+It is an **optional install** (the `multilingual` extra), because Omnilingual
+pulls in `kenlm`, which compiles from source and needs a compiler:
+
 ```bash
-just setup-multilingual        # Whisper large-v3, Omnilingual, pyannote (needs HF_TOKEN)
+sudo apt install -y build-essential zlib1g-dev libbz2-dev liblzma-dev
+just setup-multilingual        # multilingual extra + Whisper large-v3, Omnilingual, pyannote models (needs HF_TOKEN)
 just transcribe interview.m4a swa
-uv run asr-pipeline list-languages
+uv run --frozen --extra multilingual asr-pipeline list-languages
 ```
 
 ## Repository layout

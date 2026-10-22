@@ -74,11 +74,19 @@ class OmnilingualEngine(BaseASREngine):
         import os
 
         conda_prefix = os.environ.pop("CONDA_PREFIX", None)
-
-        from omnilingual_asr.models.inference.pipeline import ASRInferencePipeline
-
-        if conda_prefix is not None:
-            os.environ["CONDA_PREFIX"] = conda_prefix
+        try:
+            from omnilingual_asr.models.inference.pipeline import (
+                ASRInferencePipeline)
+        except ModuleNotFoundError as e:
+            raise ModuleNotFoundError(
+                "Omnilingual ASR is an optional install (general "
+                "multilingual path). Install it with: "
+                "uv sync --frozen --extra multilingual  "
+                "(needs build-essential; see README)"
+            ) from e
+        finally:
+            if conda_prefix is not None:
+                os.environ["CONDA_PREFIX"] = conda_prefix
 
         if checkpoint_path and Path(checkpoint_path).exists():
             logger.info(

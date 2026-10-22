@@ -16,7 +16,6 @@ dependencies = [
     "silero-vad>=5.0",
     # ASR engines
     "faster-whisper>=1.0.0",
-    "omnilingual-asr>=0.1.0",
     # Speaker diarization
     # Pinned to 3.x — pyannote 4.0 requires numpy>=2.0 which conflicts
     # with fairseq2 (omnilingual-asr dependency, needs numpy<2.0).
@@ -52,6 +51,12 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
+# General multilingual path (1,600+ languages). Pulls fairseq2 and kenlm;
+# kenlm builds from source, so this extra needs a C/C++ compiler
+# (sudo apt install build-essential zlib1g-dev libbz2-dev liblzma-dev).
+multilingual = [
+    "omnilingual-asr>=0.1.0",
+]
 dev = [
     "pytest>=7.0.0",
     "pytest-cov>=4.0.0",

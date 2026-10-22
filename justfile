@@ -27,45 +27,47 @@ sync: _check-ffmpeg
 
 # Download titu, regional Whisper and Gemma at the pinned commits; build CT2 Whisper
 setup-models:
-    uv run python scripts/download_models.py -c {{config}}
+    uv run --frozen python scripts/download_models.py -c {{config}}
 
-# Optional: models for the general multilingual path (Whisper large-v3, Omnilingual, pyannote)
+# Optional: general multilingual path (Omnilingual extra + Whisper large-v3, pyannote models).
+# Needs a compiler for kenlm: sudo apt install build-essential zlib1g-dev libbz2-dev liblzma-dev
 setup-multilingual: _hint-hf-token
-    uv run asr-pipeline setup --skip-ollama
+    uv sync --frozen --extra multilingual
+    uv run --frozen --extra multilingual asr-pipeline setup --skip-ollama
 
 # ─── Step 0 · Audio quality (no GPU) ──────────────────────────────────────
 
 # Per-file quality report → quality_report.xlsx in the folder
 quality folder *flags:
-    uv run python scripts/audio_quality_report.py "{{folder}}" {{flags}}
+    uv run --frozen python scripts/audio_quality_report.py "{{folder}}" {{flags}}
 
 # Per-file + per-speaker report (needs HF_TOKEN + pyannote terms accepted)
 quality-speakers folder *flags: _hint-hf-token
-    uv run python scripts/audio_quality_report.py "{{folder}}" --with-speakers {{flags}}
+    uv run --frozen python scripts/audio_quality_report.py "{{folder}}" --with-speakers {{flags}}
 
 # ─── Steps 1-4 · Bengali two-witness fusion (production path) ─────────────
 
 # Transcribe ONE Bengali interview. Usage: just fusion in.m4a -o ./out --log-file run.log
 fusion file *flags='':
-    HF_HUB_OFFLINE=1 uv run asr-pipeline transcribe "{{file}}" -l ben -c {{config}} {{flags}}
+    HF_HUB_OFFLINE=1 uv run --frozen asr-pipeline transcribe "{{file}}" -l ben -c {{config}} {{flags}}
 
 # Transcribe a folder of interviews (Survey Solutions layout, resume-safe)
 fusion-folder folder *flags='':
-    HF_HUB_OFFLINE=1 uv run asr-pipeline transcribe-folder "{{folder}}" -l ben -c {{config}} {{flags}}
+    HF_HUB_OFFLINE=1 uv run --frozen asr-pipeline transcribe-folder "{{folder}}" -l ben -c {{config}} {{flags}}
 
 # Calibrate the GER snap threshold from a run's .reasoning.txt
 calibrate-ger reasoning_file:
-    uv run python scripts/ger_calibrate.py "{{reasoning_file}}"
+    uv run --frozen python scripts/ger_calibrate.py "{{reasoning_file}}"
 
 # ─── General multilingual path ────────────────────────────────────────────
 
 # Transcribe any language (ISO 639-3). Usage: just transcribe in.m4a swa
 transcribe file lang *flags='':
-    uv run asr-pipeline transcribe "{{file}}" -l {{lang}} {{flags}}
+    uv run --frozen --extra multilingual asr-pipeline transcribe "{{file}}" -l {{lang}} {{flags}}
 
 # Transcribe a folder in any language
 transcribe-folder folder lang *flags='':
-    uv run asr-pipeline transcribe-folder "{{folder}}" -l {{lang}} {{flags}}
+    uv run --frozen --extra multilingual asr-pipeline transcribe-folder "{{folder}}" -l {{lang}} {{flags}}
 
 # ─── Development ──────────────────────────────────────────────────────────
 
@@ -75,11 +77,11 @@ test *flags='':
 
 # Show CUDA / GPU status
 gpu:
-    @uv run python -c "import torch; print('CUDA available:', torch.cuda.is_available()); print('Device:', torch.cuda.get_device_name(0) if torch.cuda.is_available() else 'CPU only')"
+    @uv run --frozen python -c "import torch; print('CUDA available:', torch.cuda.is_available()); print('Device:', torch.cuda.get_device_name(0) if torch.cuda.is_available() else 'CPU only')"
 
 # Check that every runtime dependency imports
 check:
-    uv run asr-pipeline check-deps
+    uv run --frozen asr-pipeline check-deps
 
 # ─── Internal helpers ─────────────────────────────────────────────────────
 
