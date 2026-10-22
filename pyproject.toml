@@ -47,6 +47,9 @@ dependencies = [
     "nemo-toolkit[asr]>=2.7.3",  # titu FastConformer-CTC (Bengali witness #1)
     # onnx 1.19+ needs ml_dtypes>=0.5 -> numpy>=2.1, conflicting with fairseq2.
     "onnx<1.19.0",
+    # pyarrow 26+ (via NeMo -> datasets) requires numpy>=2; numpy stays 1.x for
+    # fairseq2 (multilingual extra). Without this cap NeMo fails to import.
+    "pyarrow<26",
     "llama-cpp-python>=0.3.31",
 ]
 
