@@ -4,9 +4,10 @@
 # (NeMo, the CUDA llama-cpp-python wheel, fairseq2) ship Linux-only builds.
 #
 #   just                       # list recipes
-#   just setup                 # deps + pinned Bengali models (one-time)
-#   just quality ./interviews  # Step 0: audio quality report (no GPU)
-#   just fusion interview.m4a  # Steps 1-4: transcribe one interview
+#   just setup                     # deps + pinned Bengali models (one-time)
+#   just quality ./interviews      # Step 0: audio quality report (no GPU)
+#   just fusion interview.m4a      # Steps 1-4, Bengali (default profile)
+#   just fusion interview.m4a nep  # same pipeline, languages/nep.yaml
 
 set shell := ["bash", "-cu"]
 
@@ -25,9 +26,9 @@ setup: sync setup-models
 sync: _check-ffmpeg
     uv sync --frozen
 
-# Download titu, regional Whisper and Gemma at the pinned commits; build CT2 Whisper
-setup-models:
-    uv run --frozen python scripts/download_models.py -c {{config}}
+# Download a language profile's two witnesses + the Gemma judge at the pinned commits
+setup-models lang="ben":
+    uv run --frozen python scripts/download_models.py -l {{lang}} -c {{config}}
 
 # Optional: general multilingual path (Omnilingual extra + Whisper large-v3, pyannote models).
 # Needs a compiler for kenlm: sudo apt install build-essential zlib1g-dev libbz2-dev liblzma-dev
@@ -45,15 +46,15 @@ quality folder *flags:
 quality-speakers folder *flags: _hint-hf-token
     uv run --frozen python scripts/audio_quality_report.py "{{folder}}" --with-speakers {{flags}}
 
-# ─── Steps 1-4 · Bengali two-witness fusion (production path) ─────────────
+# ─── Steps 1-4 · Two-witness fusion (production path) ─────────────────────
 
-# Transcribe ONE Bengali interview. Usage: just fusion in.m4a -o ./out --log-file run.log
-fusion file *flags='':
-    HF_HUB_OFFLINE=1 uv run --frozen asr-pipeline transcribe "{{file}}" -l ben -c {{config}} {{flags}}
+# Transcribe ONE interview. Usage: just fusion in.m4a [lang] -o ./out --log-file run.log
+fusion file lang="ben" *flags='':
+    HF_HUB_OFFLINE=1 uv run --frozen asr-pipeline transcribe "{{file}}" -l {{lang}} -c {{config}} {{flags}}
 
 # Transcribe a folder of interviews (Survey Solutions layout, resume-safe)
-fusion-folder folder *flags='':
-    HF_HUB_OFFLINE=1 uv run --frozen asr-pipeline transcribe-folder "{{folder}}" -l ben -c {{config}} {{flags}}
+fusion-folder folder lang="ben" *flags='':
+    HF_HUB_OFFLINE=1 uv run --frozen asr-pipeline transcribe-folder "{{folder}}" -l {{lang}} -c {{config}} {{flags}}
 
 # Calibrate the GER snap threshold from a run's .reasoning.txt
 calibrate-ger reasoning_file:

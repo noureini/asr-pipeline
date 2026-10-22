@@ -277,15 +277,6 @@ omnilingual:
   zero_shot_model_card: "omniASR_LLM_300M_v2"  # Zero-shot for unseen langs — kept small (Bengali is known, rarely used)
   max_audio_length_s: 30            # Trimmed 40->30: caps KV-cache so LLM_1B stays within 8GB on long chunks
 
-titu:
-  # Grounding CTC witness. fastconformer is the validated default (standard
-  # orthography → complements dialectal Whisper in fusion; clean for number
-  # detection). Swap to conformer_large to A/B (more dialect/content, incl.
-  # flood months, but correlates with Whisper). See the archive/experiments branch (scripts/ab_titu_variants.py).
-  model_id: "hishab/titu_stt_bn_fastconformer"
-  # model_id: "hishab/titu_stt_bn_conformer_large"
-  batch_size: 8
-
 # ---------------------------------------------------------------------------
 # Speaker diarization
 # ---------------------------------------------------------------------------
