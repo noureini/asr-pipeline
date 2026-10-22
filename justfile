@@ -71,7 +71,7 @@ transcribe-folder folder lang *flags='':
 
 # Run the unit tests (no GPU, no models)
 test *flags='':
-    uv run pytest {{flags}}
+    uv run --frozen --extra dev pytest {{flags}}
 
 # Show CUDA / GPU status
 gpu:

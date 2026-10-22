@@ -460,7 +460,10 @@ def check_deps() -> None:
 
     # Python packages
     pkgs = [
-        ("faster_whisper", "Whisper ASR engine"),
+        ("nemo.collections.asr", "titu ASR (witness 1)"),
+        ("faster_whisper", "Whisper ASR engine (witness 2)"),
+        ("llama_cpp", "Gemma GGUF judge (llama.cpp)"),
+        ("silero_vad", "Voice activity detection"),
         ("omnilingual_asr", "Omnilingual ASR engine"),
         ("pyannote.audio", "Speaker diarization"),
         ("transformers", "NLLB-200 tokenizer"),
@@ -628,15 +631,11 @@ def setup(
         console.print()
 
         # Step 1: Silero VAD
-        console.print("  [bold]1/5[/bold] Silero VAD (~40 MB)")
+        console.print("  [bold]1/5[/bold] Silero VAD (bundled with silero-vad)")
         try:
-            import torch
+            from silero_vad import load_silero_vad
 
-            torch.hub.load(
-                repo_or_dir="snakers4/silero-vad",
-                model="silero_vad",
-                trust_repo=True,
-            )
+            load_silero_vad()
             console.print("    [green]\u2713[/green] Silero VAD ready")
             results["Silero VAD"] = "ok"
         except Exception as e:
