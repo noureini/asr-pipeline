@@ -30,6 +30,7 @@ import json
 import re
 import sys
 import tempfile
+import unicodedata
 from pathlib import Path
 
 import numpy as np
@@ -44,7 +45,12 @@ _SKIP = re.compile(r"[A-Za-z0-9०-९০-৯]")
 
 
 def toks(s: str, norm: bool = False) -> list[str]:
-    t = re.sub(r"[^\w\s]", " ", (s or "").lower()).split()
+    """Words with punctuation/symbols removed. Strips by Unicode category,
+    NOT with [^\\w\\s]: Python's \\w excludes combining vowel signs
+    (Devanagari े ो, Bengali া ি …), which would split every word."""
+    s = "".join(" " if unicodedata.category(c)[0] in "PS" else c
+                for c in (s or "").lower())
+    t = s.split()
     return [x for x in t if not _SKIP.search(x)] if norm else t
 
 

@@ -33,3 +33,9 @@ def test_wer_counts_edits():
 ])
 def test_tokens_normalisation(text, norm, expected):
     assert wc.toks(text, norm) == expected
+
+
+def test_tokens_keep_vowel_signs_together():
+    # regression: [^\w\s] split words at combining vowel signs
+    assert wc.toks("गर्नुपरेको थिएन।") == ["गर्नुपरेको", "थिएन"]
+    assert wc.toks("খানায় ছয়জন সদস্য।") == ["খানায়", "ছয়জন", "সদস্য"]
