@@ -1,0 +1,21 @@
+# Nepali candidate: Blackfire XLS-R CTC (IndicVoices-heavy) + Sagarmatha V6
+# Whisper-turbo (1,285 h broadcast / TV / interviews; sources undisclosed,
+# earlier versions included OpenSLR 54). Mode tokens: mixed script (English
+# kept in Latin), verbatim style.
+code: nep
+name: Nepali
+tag: ne
+witness_ctc:
+  backend: hf
+  model: BlackfireAI/nepali-asr-xlsr-300m        # CC BY-NC-SA 4.0
+  revision: 5caaec8a6407cefb7baf0c334c36f825f1ed3903
+  batch_size: 8
+witness_whisper:
+  model: tonibirat/sagarmatha-v6-nepali-asr      # Apache-2.0
+  revision: 20c76b656a3594469235e2a869690288b884dfd3
+  language: ne
+  ct2_subfolder: ct2-fp16
+  prefix_tokens: ["<|mixed|>", "<|verbatim|>"]
+prompt_file: config/prompts/ne_survey.yaml
+scripts: [DEVANAGARI, LATIN]
+unclear_marker: "[अस्पष्ट]"

@@ -25,7 +25,7 @@ from huggingface_hub import hf_hub_download, snapshot_download
 
 from asr_pipeline.config import load_config
 from asr_pipeline.engines.ctc_engine import CTCEngine
-from asr_pipeline.profiles import REPO_ROOT, load_profile
+from asr_pipeline.profiles import REPO_ROOT, load_profile, load_profile_file
 
 # Only the files inference needs (skips training artefacts).
 _HF_MODEL_FILES = ["*.json", "*.txt", "*.model", "model.safetensors"]
@@ -35,6 +35,8 @@ def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[1])
     ap.add_argument("-l", "--language", default="ben",
                     help="ISO 639-3 code of languages/<code>.yaml")
+    ap.add_argument("-p", "--profile", type=Path,
+                    help="profile YAML path instead of -l (e.g. a candidate)")
     ap.add_argument("-c", "--config", type=Path,
                     default=Path("fusion_production.yaml"),
                     help="shared config (judge model)")
@@ -42,7 +44,8 @@ def main() -> int:
                     help="skip the ~7 GB judge (e.g. to test a new profile)")
     args = ap.parse_args()
 
-    profile = load_profile(args.language)
+    profile = (load_profile_file(args.profile) if args.profile
+               else load_profile(args.language))
     ctc, wh = profile.witness_ctc, profile.witness_whisper
     fc = load_config(args.config).postprocessing.fusion
     print(f"Language profile: {profile.code} ({profile.name})")
@@ -58,8 +61,10 @@ def main() -> int:
                           allow_patterns=_HF_MODEL_FILES)
 
     print(f"[2/4] whisper  {wh.model} @ {wh.revision or 'latest'}")
-    whisper_dir = snapshot_download(wh.model, revision=wh.revision,
-                                    allow_patterns=_HF_MODEL_FILES)
+    whisper_dir = None
+    if not wh.ct2_subfolder:     # a shipped CT2 copy needs no PyTorch weights
+        whisper_dir = snapshot_download(wh.model, revision=wh.revision,
+                                        allow_patterns=_HF_MODEL_FILES)
 
     if args.witnesses_only:
         print("[3/4] judge    skipped (--witnesses-only)")
@@ -69,6 +74,12 @@ def main() -> int:
         hf_hub_download(fc.gguf_repo, fc.gguf_file,
                         revision=fc.gguf_revision)
 
+    if wh.ct2_subfolder:
+        print(f"[4/4] CT2 copy shipped in the repo: {wh.ct2_subfolder}/")
+        snapshot_download(wh.model, revision=wh.revision,
+                          allow_patterns=[f"{wh.ct2_subfolder}/*"])
+        print("Done. Models are cached; runs can now use HF_HUB_OFFLINE=1.")
+        return 0
     if not wh.ct2_path:
         print("[4/4] CT2 copy skipped (witness_whisper.ct2_path is empty)")
         return 0

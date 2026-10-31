@@ -382,12 +382,28 @@ class FusionTranslator:
         A/B-validated) when the local CT2 conversion exists; otherwise fall
         back to the HF transformers path."""
         from pathlib import Path as _P
+        ww = self._profile.witness_whisper
+        if ww.ct2_subfolder:
+            # ready CT2 conversion inside the model repo (cached by
+            # download_models.py; offline-safe once downloaded)
+            from huggingface_hub import snapshot_download
+            snap = snapshot_download(
+                ww.model, revision=ww.revision,
+                allow_patterns=[f"{ww.ct2_subfolder}/*"],
+                local_files_only=True)
+            self._whisper_ct2_path = str(_P(snap) / ww.ct2_subfolder)
         if self._whisper_ct2_path and _P(self._whisper_ct2_path).exists():
             try:
                 return self._run_whisper_ct2(aligned, wav_path)
             except Exception as ex:
+                if ww.prefix_tokens:
+                    raise          # mode tokens are CT2-only: no fallback
                 logger.warning("  CT2 Whisper failed (%s) — falling back to "
                                "HF transformers", type(ex).__name__)
+        if ww.prefix_tokens:
+            raise ValueError(
+                "witness_whisper.prefix_tokens need a CT2 model "
+                "(ct2_path or ct2_subfolder)")
         return self._run_whisper_hf(aligned, wav_path)
 
     def _run_whisper_ct2(self, aligned: list[AlignedSegment],
@@ -416,7 +432,16 @@ class FusionTranslator:
         fe = wm.feature_extractor
         tok = Tokenizer(wm.hf_tokenizer, multilingual=True,
                         task="transcribe", language=self._whisper_language)
-        prompt = list(tok.sot_sequence) + [tok.no_timestamps]
+        # [sot, <mode tokens…>, <|lang|>, <|transcribe|>, <|notimestamps|>]
+        prefix = []
+        for t in self._profile.witness_whisper.prefix_tokens:
+            tid = wm.hf_tokenizer.token_to_id(t)
+            if tid is None:
+                raise ValueError(f"prefix token {t!r} not in the Whisper "
+                                 f"witness vocabulary")
+            prefix.append(tid)
+        sot = list(tok.sot_sequence)
+        prompt = sot[:1] + prefix + sot[1:] + [tok.no_timestamps]
         # Seed CT2's RNG so the sampled N-best is reproducible run-to-run
         # (matches the Gemma fixed-seed → fully deterministic deliverable).
         ctranslate2.set_random_seed(self._seed)

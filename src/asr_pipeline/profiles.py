@@ -52,6 +52,13 @@ class WhisperWitness(BaseModel):
     # Local CTranslate2 conversion (faster batched N-best). Built by
     # scripts/download_models.py; "" → HF transformers path only.
     ct2_path: str = ""
+    # Or: a ready CTranslate2 conversion shipped inside the model repo
+    # (its subfolder name, e.g. "ct2-fp16"); used instead of ct2_path.
+    ct2_subfolder: Optional[str] = None
+    # Model-specific decoder mode tokens inserted right after
+    # <|startoftranscript|> (e.g. Sagarmatha: "<|mixed|>", "<|verbatim|>").
+    # CT2 path only.
+    prefix_tokens: list[str] = Field(default_factory=list)
 
 
 class LanguageProfile(BaseModel):
