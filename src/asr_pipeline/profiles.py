@@ -92,6 +92,12 @@ def available_profiles() -> list[str]:
                   if not p.stem.startswith("_"))
 
 
+def load_profile_file(path: Path) -> LanguageProfile:
+    """Load a profile from any path (e.g. a candidate pair being tested)."""
+    data = yaml.safe_load(Path(path).read_text(encoding="utf-8")) or {}
+    return LanguageProfile(**data)
+
+
 def load_profile(code: str) -> LanguageProfile:
     """Load `languages/<code>.yaml`; a clear error lists what exists."""
     path = PROFILES_DIR / f"{code}.yaml"
@@ -101,8 +107,7 @@ def load_profile(code: str) -> LanguageProfile:
             f"No language profile for '{code}' ({path}). Available: {have}. "
             f"To add one, copy languages/_template.yaml to "
             f"languages/{code}.yaml.")
-    data = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
-    profile = LanguageProfile(**data)
+    profile = load_profile_file(path)
     if profile.code != code:
         raise ValueError(
             f"{path.name} declares code '{profile.code}', expected '{code}'")
