@@ -338,27 +338,123 @@ multilingual and is shared. Everything language-specific is one profile file:
 Digits need no setting: the number guard compares digits of any script by
 value (৬০ = ६० = 60).
 
-**Worked example:** [`languages/nep.yaml`](languages/nep.yaml) is a **draft**
-Nepali profile (AI Lab Nepal's code-mix IndicConformer, CTC head, plus their
-Whisper large-v3-turbo; CC BY-NC 4.0). Both witnesses are smoke-tested on
-FLEURS Nepali clips; its prompt
-([`config/prompts/ne_survey.yaml`](config/prompts/ne_survey.yaml)) still
-needs a native-speaker review, and it is not validated on survey audio.
+Witness models may also need these per-model settings: `decoder: ctc` for
+hybrid NeMo checkpoints (CTC + RNN-T heads; the witness must use the CTC
+head), `ct2_subfolder` when the repo already ships a CTranslate2 copy, and
+`prefix_tokens` for Whisper fine-tunes with mode tokens (e.g. Sagarmatha's
+`<|mixed|>`, `<|verbatim|>`).
 
-Steps, e.g. for Nepali (`nep`):
+### Choosing models for a new language
 
-1. `cp languages/_template.yaml languages/nep.yaml` and fill in the two
-   witness models. For the CTC witness, a dedicated Nepali CTC model is best;
-   Meta's MMS (`facebook/mms-1b-all`, `backend: hf`, `target_lang: npi`)
-   covers Nepali as a fallback.
-2. Copy `config/prompts/bn_survey.yaml` to `config/prompts/ne_survey.yaml`.
-   Keep the structure, the role rules and the output format. Replace the
-   dialect glossary, domain priors and number words, write `[ne]` for the
-   native line and the Nepali unclear marker. Keep the number rules.
-3. `just setup-models nep`, then pin the revisions you validated (full
-   commit hashes) in the profile.
-4. `just fusion interview.m4a nep`
-5. Validate on 20–30 segments with a native speaker before scaling.
+**The rule that matters:** the judge can only fix a word if at least one
+witness heard it right. So the best pair is not the two most accurate
+models; it is two *good* models whose mistakes fall on **different words**.
+That needs different architectures (CTC vs Whisper) and, above all,
+**different training data**. A pair fine-tuned on the same dataset makes the
+same mistakes, and no judge can recover them.
+
+**1. Find candidates (both fine-tuned on the language).**
+
+- Search the Hub:
+  `https://huggingface.co/api/models?search=<language>&pipeline_tag=automatic-speech-recognition&sort=downloads&direction=-1&limit=100`,
+  plus the language code. Check the big regional families too: AI4Bharat
+  (IndicConformer), ARTPARK (SraVaani), Meta (MMS), national universities
+  and labs.
+- Look for an **independent benchmark** that ran many models on the same
+  data. For Nepali, [harrrshall/kriti](https://huggingface.co/harrrshall/kriti)
+  publishes 19 open systems on 3,630 utterances. Read its caveats (development
+  set, mostly one data source).
+- For each candidate, record from the model card: **training datasets and
+  hours**, base model, architecture and decoder, reported WER **and on which
+  test set**, license (CC BY-NC = non-commercial), gated or not, last update.
+- Watch for one dataset hiding in every model (Nepali: OpenSLR 54), and for
+  models trained on the test set you plan to use (some include FLEURS).
+
+**2. Measure the pairs** on the same reference clips:
+
+```bash
+uv run --frozen python scripts/fetch_fleurs.py ne_np ~/fleurs_ne -n 100   # any FLEURS language
+# write candidate profiles in languages/candidates/, then for each:
+uv run --frozen python scripts/download_models.py -p languages/candidates/<pair>.yaml --witnesses-only
+uv run --frozen python scripts/witness_complementarity.py -p languages/candidates/<pair>.yaml ~/fleurs_ne ~/compl
+```
+
+The report gives each witness's WER, the **oracle** (better witness per
+clip), the **shared-error rate** (words both got wrong, as a share of words
+either got wrong) and the **rescuable** share (one witness's errors the other
+got right). Transcripts are cached per model, so pairs can be re-mixed for
+free. Measured on 100 FLEURS clips (read speech) in this repo:
+
+| Pair | W1 WER | W2 WER | Oracle | Shared errors | W1 errors W2 fixes | W2 errors W1 fixes |
+|---|---|---|---|---|---|---|
+| **Bengali** titu + regional Whisper (validated) | 35.6% | 31.6% | 26.0% | **38%** | 41% | 52% |
+| Nepali: AI Lab IndicConformer + AI Lab Whisper (same data) | 40.5% | 43.3% | 37.2% | 63% | 25% | 25% |
+| Nepali: Blackfire XLS-R + AI Lab Whisper | 38.1% | 43.3% | 34.6% | 57% | 29% | 31% |
+| Nepali: Blackfire XLS-R + Sagarmatha V6 | 38.1% | 25.4% | 24.1% | 56% | 44% | 11% |
+
+What to aim for, using the validated Bengali pair as the yardstick:
+- **Shared errors around 40% or lower.** At 60%, Gemma's reconciliation on
+  Nepali gained only ~2 points of WER over the best single witness.
+- **Rescue in both directions** (each witness fixes a large share of the
+  other's errors). A strong witness paired with a weak one (Blackfire +
+  Sagarmatha: 44% vs 11%) is little better than the strong one alone.
+- The oracle clearly below the better witness.
+
+**3. Choose the judge LLM.** No current open LLM publishes a translation
+score for most low-resource languages, so check, in order:
+1. Is the language listed in the model card or technical report?
+2. Per-language scores: FLORES-200 xx→en (chrF++), then MMLU-ProX /
+   Global-MMLU / INCLUDE, then Belebele. Note that multilingual averages
+   (MMMLU, WMT24++) often leave the language out.
+3. Fit: a Q4 GGUF from the official repo, Unsloth or bartowski, with ~2 GB
+   VRAM spare for the KV cache. License: Apache-2.0 / MIT / Gemma.
+4. A dedicated translation model on clean text as an upper bound. For Nepali
+   → English on FLORES-200, chrF++ is 68.1 for IndicTrans2 and 66.9 for
+   NLLB-54B (IndicTrans2 paper).
+
+Then run 50–100 FLEURS clips through the full fusion step with 2–3 candidate
+judges and compare English chrF against the FLEURS English references, the
+reconciled line's CER against the reference and each witness, the share of
+replies that break the output format, and any numbers not present in either
+witness.
+
+Candidate judges (all Apache-2.0, not gated; none has a published Nepali
+translation score, and they are **not yet tested** with this repo's
+llama.cpp version):
+
+| GPU | Candidate | Note |
+|---|---|---|
+| 8 GB | `google/gemma-3-12b-it` (current) | Nepali FLEURS: English chrF ≈ 48–49 (this repo, 100 clips) |
+| 8 GB | `google/gemma-4-12B-it` (official `-qat-q4_0-gguf`) | Newer generation; much higher multilingual averages |
+| 8 GB | `Qwen/Qwen3.5-9B` (Unsloth GGUF, thinking off) | Qwen scores above Gemma 3 on Nepali MMLU-ProX at equal size |
+| 16 GB | `Qwen/Qwen3.5-27B` (IQ4_XS) or `google/gemma-4-31B-it` | Best quality that fits 16 GB |
+
+**4. Write the profile and prompt.** Copy `languages/_template.yaml` and
+`config/prompts/bn_survey.yaml`. In the prompt, keep the structure, the role
+rules, the number rules and the output format; replace the dialect glossary,
+survey priors and number words; use the profile's `[tag]` and unclear marker.
+Pin every model to a full commit hash.
+
+**5. Validate end to end.** Run the full pipeline on 50–100 FLEURS clips, then
+on 20–30 real interview segments checked by a native speaker. FLEURS is read
+speech; field recordings (8 kHz phone audio, conversation, code-switching)
+behave differently.
+
+**Pitfalls met while adding Nepali** (all handled in the code now):
+- Score with tokens split on punctuation by Unicode category: the regex
+  `[^\w\s]` splits Devanagari/Bengali words at their vowel signs.
+- Fine-tunes that **add tokens** to Whisper's vocabulary lose them with
+  faster-whisper's own `decode` (Sagarmatha went from 25% to 93% WER).
+- Hybrid NeMo models default to the RNN-T head; the witness needs `decoder: ctc`.
+- Some judges drop the `[tag]` / `[en]` labels; count format failures
+  separately from accuracy.
+
+**Nepali status:** [`languages/nep.yaml`](languages/nep.yaml) is a **draft**
+(AI Lab pair, 63% shared errors). The best measured witness 2 is Sagarmatha V6
+(25.4% WER). The strongest witness 1 on kriti's benchmark (AI4Bharat Nepali
+IndicConformer, CTC head, CER 8.5%; gated) is still to be measured with it.
+The prompt ([`config/prompts/ne_survey.yaml`](config/prompts/ne_survey.yaml))
+needs a native-speaker review.
 
 ## Other languages without a profile (general path)
 
@@ -382,6 +478,7 @@ uv run --frozen --extra multilingual asr-pipeline list-languages
 ```
 fusion_production.yaml     Shared production config (judge, VAD, decoding, guards)
 languages/                 One profile per language: witnesses, prompt, scripts
+  candidates/              Witness pairs being measured (not selectable with -l)
 config/prompts/            Judge prompt (editable YAML)
 src/asr_pipeline/
   cli.py                   `asr-pipeline` command line
@@ -398,6 +495,8 @@ scripts/
   audio_quality_report.py  Step 0
   download_models.py       Pinned model download + CT2 conversion
   ger_calibrate.py         GER snap-threshold calibration
+  fetch_fleurs.py          FLEURS test set for any language (+ English refs)
+  witness_complementarity.py  How complementary two witnesses are
 tests/                     Unit tests (no GPU, no models)
 docs/presentation/         The presentation this code implements
 ```
