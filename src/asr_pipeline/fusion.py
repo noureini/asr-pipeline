@@ -481,7 +481,12 @@ class FusionTranslator:
                 for (oi, _), r in zip(batch, res):
                     hyps, seen = [], set()
                     for ids in r.sequences_ids:
-                        txt = tok.decode(ids).strip()
+                        # full tokenizer, not tok.decode: faster-whisper's
+                        # decode drops every id >= <|endoftext|>, i.e. all
+                        # tokens a fine-tune ADDED to the vocabulary (e.g.
+                        # Sagarmatha's 2,000 Devanagari tokens).
+                        txt = wm.hf_tokenizer.decode(
+                            ids, skip_special_tokens=True).strip()
                         if txt and txt not in seen:
                             seen.add(txt); hyps.append(txt)
                     out[oi] = hyps or [""]
