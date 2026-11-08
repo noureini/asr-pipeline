@@ -156,6 +156,20 @@ def load_prompts(prompts_file: Optional[str]) -> dict:
     return prompts
 
 
+def fusion_grammar(tag: str, think: bool = True) -> str:
+    """GBNF grammar for the judge's reply: optional <think> block, then one
+    or more role-labelled turns of exactly three lines. With constrained
+    decoding the reply can no longer drop the @ROLE / [tag] / [en] labels
+    (13-20% of Nepali replies did without it)."""
+    think_rule = 'think? ' if think else ''
+    return (
+        f'root ::= {think_rule}turn+\n'
+        'think ::= "<think>" [^<]* "</think>" "\\n"+\n'
+        f'turn ::= "@" role "\\n" "[{tag}] " line "\\n" "[en] " line "\\n"?\n'
+        'role ::= "ENUMERATOR" | "RESPONDENT"\n'
+        'line ::= [^\\n]+\n')
+
+
 def _strip_think(text: str) -> str:
     """Return the post-reasoning body: drop everything up to and including
     </think> so a stray "[bn]"/"@ROLE" inside the reasoning can't match. A
@@ -306,6 +320,7 @@ class FusionTranslator:
         fusion_backend: str = "inprocess",
         n_parallel: int = 3,
         server_port: int = 8081,
+        constrain_format: bool = False,
     ) -> None:
         # Language-specific parts: Whisper witness, prompt, tag, scripts.
         self._profile = profile or load_profile("ben")
@@ -368,6 +383,12 @@ class FusionTranslator:
         if not fusion_think:
             self._fusion_prompt = _strip_think_instruction(self._fusion_prompt)
             logger.info("  fusion: think-OFF arm (no <think> block)")
+        # Constrained decoding (GBNF) of the reply format; in-process only.
+        self._grammar = (fusion_grammar(self._tag, think=fusion_think)
+                         if constrain_format else None)
+        if constrain_format and fusion_backend == "server":
+            logger.warning("  constrain_format is ignored by the server "
+                           "backend (in-process only)")
 
     # ── second witness: Whisper-regional, BATCHED across chunks ───────
     #    Intra-stage parallelism: many chunks per GPU forward pass via
@@ -726,7 +747,7 @@ class FusionTranslator:
                     top_p=self._top_p, top_k=self._top_k,
                     min_p=self._min_p, repeat_penalty=self._repeat_penalty,
                     seed=self._seed, max_tokens=self._fusion_max_tokens,
-                    return_meta=True)
+                    grammar=self._grammar, return_meta=True)
                 turns = self._finish_segment(i, ans, meta, tt, whyps)
             except Exception as ex:
                 logger.warning("  fusion seg %d failed: %s", i,

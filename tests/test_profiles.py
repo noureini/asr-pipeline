@@ -171,3 +171,12 @@ def test_language_head_ctc_words_collapse_and_timestamps():
     assert words[1].start_s == pytest.approx(10.12)   # frame 3
     assert words[1].end_s == pytest.approx(10.24)     # frame 5 + 1
     assert e._ctc_words([4, 4], 0.04, 0.0) == ("", [])
+
+
+def test_fusion_grammar_uses_profile_tag_and_roles():
+    from asr_pipeline.fusion import fusion_grammar
+    g = fusion_grammar("ne")
+    assert 'root ::= think? turn+' in g
+    assert '"[ne] "' in g and '"[en] "' in g
+    assert '"ENUMERATOR" | "RESPONDENT"' in g
+    assert "think?" not in fusion_grammar("ne", think=False)

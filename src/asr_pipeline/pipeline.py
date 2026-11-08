@@ -776,6 +776,7 @@ class ASRPipeline:
                 fusion_backend=fc.fusion_backend,
                 n_parallel=fc.n_parallel,
                 server_port=fc.server_port,
+                constrain_format=fc.constrain_format,
             )
             return translator.process(aligned, wav_path)
 

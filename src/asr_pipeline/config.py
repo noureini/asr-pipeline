@@ -293,6 +293,10 @@ class FusionConfig(BaseModel):
     # Falls back to in-process if the server binary/start fails.
     fusion_backend: Literal["inprocess", "server"] = "inprocess"
     n_parallel: int = 3              # llama-server slots (8GB fits ~3)
+    # Constrain the judge reply to the @ROLE / [tag] / [en] format with a
+    # GBNF grammar (llama.cpp, in-process backend). Off by default: the
+    # Bengali setup was validated without it.
+    constrain_format: bool = False
     server_port: int = 8081
 
     # ── Generation hyperparameters ────────────────────────────────────

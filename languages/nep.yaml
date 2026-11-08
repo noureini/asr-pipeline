@@ -4,44 +4,45 @@
 # Used by:  just setup-models nep  &&  just fusion interview.m4a nep
 # Shared settings (Gemma judge, VAD, decoding, guards): fusion_production.yaml
 #
-# Status: witnesses + Gemma judge run end to end on 3 FLEURS Nepali clips; the
-# judge prompt still needs a native-speaker review, and the whole pipeline
-# must be validated on 20-30 real interview segments before use.
+# Chosen by measurement (scripts/witness_complementarity.py, 100 FLEURS
+# Nepali clips, see README "Choosing models for a new language"): the best
+# CTC witness and the best Whisper witness among open Nepali models, trained
+# on different data. Together they leave ~17% of reference words that
+# neither got right (Bengali pair: 13.5%; previous AI Lab pair: 26%).
 #
-# Both witnesses come from AI Lab Pvt. Ltd. (Nepal), fine-tuned on the same
-# ~130 h of Nepali–English code-mixed speech (read, lectures, podcasts, news,
-# conversation, interviews). Output: Nepali in Devanagari, English words in
-# lowercase Latin, no punctuation, numbers spelled as words.
+# Status: judge prompt still needs a native-speaker review; the pipeline must
+# be validated on 20-30 real interview segments before use.
 # Caveats:
-#   - License CC BY-NC 4.0 (non-commercial use only).
-#   - Same training data for both witnesses → their errors are less
-#     independent than titu vs Whisper. A/B alternative for witness 1: the
-#     original ai4bharat/indicconformer_stt_ne_hybrid_ctc_rnnt_large (MIT,
-#     gated, Devanagari-only vocabulary).
-#   - Trained on wideband audio, not 8 kHz phone recordings.
+#   - Witness 1 is gated on Hugging Face (accept its terms; HF_TOKEN needed
+#     for the one-time download) and needs language_head (AI4Bharat fork).
+#   - Its training data is not published (most likely IndicVoices: Nepali
+#     as spoken in India). Witness 2: Nepali YouTube (80%) + OpenSLR (20%).
+#   - Both trained mostly on wideband audio, not 8 kHz phone recordings.
 # =============================================================================
 code: nep
 name: Nepali
 tag: ne                       # [ne] lines in the judge reply and transcript
 
-# Witness 1 · sound: IndicConformer (hybrid CTC + RNN-T) fine-tuned for
-# code-mixed Nepali. Decoded with its CTC head (acoustically literal):
-# model-card WER 21.8% with CTC vs 19.9% with RNN-T on their test set.
+# Witness 1 · sound: AI4Bharat Nepali IndicConformer (MIT), CTC head.
+# FLEURS 100 clips: 27.9% WER (other open Nepali CTC models: 38-40%).
 witness_ctc:
   backend: nemo
-  model: ailabpvtltd/indicconformer-nepali-english-codemix-asr
-  revision: d80adf63ca0562a5e2042f6bd4462fe0b68729a0
-  nemo_file: indicconformer-ne-en-codemix.nemo
+  model: ai4bharat/indicconformer_stt_ne_hybrid_ctc_rnnt_large
+  revision: cd09ba7720f3b17d259f6bfd03e1463bc5ba517d
+  nemo_file: indicconformer_stt_ne_hybrid_rnnt_large.nemo
   decoder: ctc
+  language_head: ne           # multi-softmax checkpoint (AI4Bharat NeMo fork)
   batch_size: 8
 
-# Witness 2 · structure: Whisper large-v3-turbo fine-tuned on the same data.
-# Model-card WER 16.4% overall, 11.6% on interviews.
+# Witness 2 · structure: Sagarmatha V6, Whisper large-v3-turbo fine-tuned on
+# 1,285 h of Nepali (Apache-2.0). FLEURS 100 clips: 25.4% WER. Mode tokens:
+# mixed script (English kept in Latin), verbatim style.
 witness_whisper:
-  model: ailabpvtltd/whisper-large-v3-turbo-nepali-english-codemix-asr
-  revision: 8eff5c489628694a9f3ff2a02f3225ccfd6c6046
+  model: tonibirat/sagarmatha-v6-nepali-asr
+  revision: 20c76b656a3594469235e2a869690288b884dfd3
   language: ne
-  ct2_path: models/ailab_whisper_ne_ct2
+  ct2_subfolder: ct2-fp16
+  prefix_tokens: ["<|mixed|>", "<|verbatim|>"]
 
 # Judge instructions — DRAFT, needs native-speaker review.
 prompt_file: config/prompts/ne_survey.yaml

@@ -9,9 +9,11 @@ this reports, per witness and for the pair:
   WER            each witness alone (raw, and with Latin-script words and
                  digits dropped so spelling conventions don't count)
   oracle WER     per clip, pick the better witness — a floor for selection
-  shared errors  of the reference words EITHER witness got wrong, the share
-                 BOTH got wrong (lower = more complementary). The judge
-                 cannot recover these words.
+  BOTH wrong     share of all reference words that NEITHER witness got
+                 right: the floor the judge cannot go below (lower = better)
+  shared errors  of the words EITHER witness got wrong, the share BOTH got
+                 wrong. Rises as both witnesses get better (the leftovers are
+                 the hard words), so compare pairs on BOTH wrong first.
   rescuable      share of each witness's errors that the other got right
                  (for Whisper also counting any of its N-best readings)
 
@@ -194,8 +196,10 @@ def main() -> int:
             f"[{tag}]",
             f"  WER  W1 {e1 / n:6.1%}   W2 {e2 / n:6.1%}   "
             f"oracle (best per clip) {eo / n:6.1%}",
+            f"  BOTH wrong (share of all reference words): "
+            f"{shared / max(n, 1):6.1%}   <- the judge's floor; lower = better",
             f"  shared errors (both wrong / either wrong): "
-            f"{shared / max(either, 1):6.1%}   <- lower = more complementary",
+            f"{shared / max(either, 1):6.1%}   (rises as both witnesses improve)",
             f"  rescuable: W1 errors W2 got right (any N-best) "
             f"{res1 / max(bad1_n, 1):6.1%} | W2 errors W1 got right "
             f"{res2 / max(bad2_n, 1):6.1%}", ""]
