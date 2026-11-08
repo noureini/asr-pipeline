@@ -88,6 +88,10 @@ class ChunkingConfig(BaseModel):
     # default == default.yaml so the pipeline is safe without a YAML override.
     max_duration_s: int = 15
     overlap_s: int = 2
+    # Also cut at every pause of at least this many seconds (turn-aware
+    # pieces for speaker-role labelling). None = WhisperX greedy merge only
+    # (the validated Bengali setting).
+    split_on_pause_s: Optional[float] = None
 
 
 class NoiseReductionConfig(BaseModel):
