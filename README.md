@@ -423,11 +423,13 @@ free. Measured on 100 FLEURS clips (read speech) in this repo:
 | Nepali: AI Lab IndicConformer + AI Lab Whisper (same data) | 40.5% | 43.3% | 37.2% | 63% | 25% | 25% |
 | Nepali: Blackfire XLS-R + AI Lab Whisper | 38.1% | 43.3% | 34.6% | 57% | 29% | 31% |
 | Nepali: Blackfire XLS-R + Sagarmatha V6 | 38.1% | 25.4% | 24.1% | 56% | 44% | 11% |
-| **Nepali: AI4Bharat IndicConformer (CTC) + Sagarmatha V6** (current) | 27.9% | 25.4% | 21.9% | n/a | n/a | n/a |
+| **Nepali: AI4Bharat IndicConformer (CTC) + Sagarmatha V6** (current) | 27.9% | 25.4% | 21.9% | 63% | 33% | 15% |
 
-A simpler floor to compare pairs: the share of reference words **neither**
-witness got right (no judge can recover them). Bengali pair: 13.5%; Nepali
-AI4Bharat + Sagarmatha: 17.7%; Nepali AI Lab pair: 26%.
+The shared-error rate is a ratio, so it can hide that a pair simply makes
+fewer errors. Also compare the **floor**: the share of reference words
+**neither** witness got right (no judge can recover them). Bengali pair:
+13.5%; Nepali AI4Bharat + Sagarmatha: 17.7% (the lowest of the Nepali pairs);
+Nepali AI Lab pair: 26%.
 
 What to aim for, using the validated Bengali pair as the yardstick:
 - **Shared errors around 40% or lower.** At 60%, Gemma's reconciliation on
