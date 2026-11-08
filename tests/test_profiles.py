@@ -145,3 +145,29 @@ def test_nepali_prompt_is_consistent_with_profile():
         filled = Template(text).safe_substitute(literal="X", fluent="Y")
         assert not re.findall(r"\$[a-zA-Z_]+", filled)
     assert "<think>" not in _strip_think_instruction(prompt)
+
+
+# ── multi-softmax (AI4Bharat) CTC head: greedy collapse → words ───────
+class _FakeSPTokenizer:
+    vocab = {0: "▁मेरो", 1: "▁घर", 2: "मा", 3: "▁छ"}
+
+    def ids_to_tokens(self, ids):
+        return [self.vocab[i] for i in ids]
+
+    def ids_to_text(self, ids):
+        return "".join(self.vocab[i] for i in ids).replace("▁", " ").strip()
+
+
+def test_language_head_ctc_words_collapse_and_timestamps():
+    e = CTCEngine(model_id="x/y", language="nep", language_head="ne")
+    e._lang_tokenizer = _FakeSPTokenizer()
+    e._lang_blank = 4
+    # frames: मेरो मेरो _ घर _ मा _ _ छ   (blank = 4)
+    preds = [0, 0, 4, 1, 4, 2, 4, 4, 3]
+    text, words = e._ctc_words(preds, frame_s=0.04, offset_s=10.0)
+    assert text == "मेरो घरमा छ"
+    assert [w.word for w in words] == ["मेरो", "घरमा", "छ"]
+    assert words[0].start_s == pytest.approx(10.0)
+    assert words[1].start_s == pytest.approx(10.12)   # frame 3
+    assert words[1].end_s == pytest.approx(10.24)     # frame 5 + 1
+    assert e._ctc_words([4, 4], 0.04, 0.0) == ("", [])

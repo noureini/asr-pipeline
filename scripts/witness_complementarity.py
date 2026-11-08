@@ -99,7 +99,8 @@ def run_ctc(p: LanguageProfile, clips: list[Path]) -> dict:
     w = p.witness_ctc
     eng = CTCEngine(model_id=w.model, language=p.code, backend=w.backend,
                     revision=w.revision, nemo_file=w.nemo_file,
-                    decoder=w.decoder, target_lang=w.target_lang,
+                    decoder=w.decoder, language_head=w.language_head,
+                    target_lang=w.target_lang,
                     batch_size=w.batch_size)
     eng.load()
     out = {}

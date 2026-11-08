@@ -38,6 +38,11 @@ class CTCWitness(BaseModel):
     # "ctc" keeps the witness acoustically literal; RNN-T/TDT add an
     # internal language model. None = the checkpoint's default decoder.
     decoder: Optional[Literal["ctc", "rnnt"]] = None
+    # nemo multi-language checkpoints trained with AI4Bharat's NeMo fork
+    # (IndicConformer hybrids: one output head per language): the language
+    # head to decode, e.g. "ne". Loads them in stock NeMo via compatibility
+    # patches and decodes the CTC head restricted to that language.
+    language_head: Optional[str] = None
     # hf: MMS-style adapter language (e.g. "npi"), None for plain models
     target_lang: Optional[str] = None
     batch_size: int = 8

@@ -10,6 +10,7 @@ witness_ctc:
   revision: cd09ba7720f3b17d259f6bfd03e1463bc5ba517d
   nemo_file: indicconformer_stt_ne_hybrid_rnnt_large.nemo
   decoder: ctc
+  language_head: ne            # AI4Bharat-fork multi-softmax checkpoint
   batch_size: 8
 witness_whisper:
   model: tonibirat/sagarmatha-v6-nepali-asr      # Apache-2.0

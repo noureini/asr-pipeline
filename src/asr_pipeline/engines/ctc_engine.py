@@ -40,6 +40,7 @@ class CTCEngine(BaseASREngine):
         revision: Optional[str] = None,
         nemo_file: Optional[str] = None,
         decoder: Optional[str] = None,
+        language_head: Optional[str] = None,
         target_lang: Optional[str] = None,
         device: str = "cuda",
         batch_size: int = 8,
@@ -50,6 +51,10 @@ class CTCEngine(BaseASREngine):
         self._revision = revision
         self._nemo_file = nemo_file
         self._decoder = decoder               # hybrid nemo: "ctc" | "rnnt"
+        # multi-softmax nemo (AI4Bharat fork): language head to decode
+        self._language_head = language_head
+        self._lang_tokenizer: Optional[object] = None
+        self._lang_blank: int = 0
         self._target_lang = target_lang
         self._device = device
         self._batch_size = batch_size
@@ -93,6 +98,11 @@ class CTCEngine(BaseASREngine):
                 "The nemo CTC backend requires nemo_toolkit (a core "
                 "dependency, ~3 GB). Re-sync the environment: uv sync"
             ) from e
+        if self._language_head:
+            # AI4Bharat-fork multi-softmax checkpoint → compatibility patches
+            from asr_pipeline.engines.indic_multisoftmax import (
+                apply_multisoftmax_patches)
+            apply_multisoftmax_patches()
         if self._revision:
             # Pinned commit: fetch that exact .nemo checkpoint (cached,
             # offline-safe once downloaded) and restore it.
@@ -107,7 +117,9 @@ class CTCEngine(BaseASREngine):
             self._model = nemo_asr.models.ASRModel.from_pretrained(
                 self._model_id
             )
-        if self._decoder:
+        if self._language_head:
+            self._setup_language_head()
+        elif self._decoder:
             # Hybrid checkpoints (e.g. IndicConformer: CTC + RNN-T heads)
             # decode with RNN-T by default; the witness wants the CTC head.
             if not hasattr(self._model, "change_decoding_strategy") or \
@@ -122,6 +134,29 @@ class CTCEngine(BaseASREngine):
             import torch
             self._model = self._model.to(torch.device("cuda"))
         self._model.eval()
+
+    def _setup_language_head(self) -> None:
+        """Multi-softmax checkpoint: restrict the CTC head to one language's
+        token block (+ blank), as AI4Bharat's fork does at inference."""
+        tok = self._model.tokenizer
+        lang = self._language_head
+        if not hasattr(tok, "langs_by_token_id") or \
+                lang not in getattr(tok, "tokenizers_dict", {}):
+            raise ValueError(
+                f"{self._model_id}: no '{lang}' head in an aggregate "
+                f"(multi-language) tokenizer; check witness_ctc.language_head")
+        masks = {}
+        for name in tok.tokenizers_dict:
+            mask = [tok.langs_by_token_id[i] == name
+                    for i in range(len(tok.langs_by_token_id))]
+            mask.append(True)                 # blank
+            masks[name] = mask
+        self._model.ctc_decoder.language_masks = masks
+        # per-language blank sits right after that language's tokens
+        self._lang_blank = (self._model.joint._vocab_size
+                            // len(tok.tokenizers_dict))
+        self._lang_tokenizer = tok.tokenizers_dict[lang]
+        logger.info(f"  language head: {lang} (CTC)")
 
     def _load_hf(self) -> None:
         from transformers import AutoModelForCTC, AutoProcessor
@@ -183,7 +218,9 @@ class CTCEngine(BaseASREngine):
         if self._model is None:
             raise RuntimeError("CTCEngine not loaded — call load() first")
 
-        if self._backend == "nemo":
+        if self._language_head:
+            results = self._transcribe_language_head(chunks)
+        elif self._backend == "nemo":
             results = self._transcribe_nemo(chunks)
         else:
             results = self._transcribe_hf(chunks)
@@ -226,6 +263,74 @@ class CTCEngine(BaseASREngine):
                 results.append((getattr(out, "text", str(out)),
                                 self._nemo_words(out, chunk.start_s)))
         return results
+
+    def _transcribe_language_head(
+        self, chunks: list[AudioChunk],
+    ) -> list[tuple[str, list[WordSegment]]]:
+        """Greedy CTC over one language head of a multi-softmax checkpoint,
+        with word timestamps from the frames where each token is emitted."""
+        import soundfile as sf
+        import torch
+
+        cfg = self._model.cfg
+        frame_s = (cfg.preprocessor.window_stride
+                   * self._model.encoder.subsampling_factor)
+        dev = next(self._model.parameters()).device
+        results = []
+        for b in range(0, len(chunks), self._batch_size):
+            batch = chunks[b:b + self._batch_size]
+            wavs = []
+            for c in batch:
+                audio, sr = sf.read(str(c.waveform_path), dtype="float32")
+                if audio.ndim > 1:
+                    audio = audio.mean(axis=1)
+                if sr != _SR:
+                    raise ValueError(f"expected {_SR} Hz chunks, got {sr} Hz")
+                wavs.append(torch.from_numpy(audio))
+            lengths = torch.tensor([len(w) for w in wavs], device=dev)
+            padded = torch.nn.utils.rnn.pad_sequence(
+                wavs, batch_first=True).to(dev)
+            with torch.inference_mode():
+                encoded, enc_len = self._model(
+                    input_signal=padded, input_signal_length=lengths)
+                log_probs = self._model.ctc_decoder(
+                    encoder_output=encoded,
+                    language_ids=[self._language_head] * len(batch))
+            for k, chunk in enumerate(batch):
+                preds = log_probs[k, :int(enc_len[k])].argmax(-1).tolist()
+                results.append(self._ctc_words(preds, frame_s,
+                                               chunk.start_s))
+        return results
+
+    def _ctc_words(self, preds: list[int], frame_s: float,
+                   offset_s: float) -> tuple[str, list[WordSegment]]:
+        """Collapse greedy CTC frames → text + words (a SentencePiece piece
+        starting with ▁ opens a new word)."""
+        tok = self._lang_tokenizer
+        ids, frames, prev = [], [], None
+        for t, p in enumerate(preds):
+            if p != self._lang_blank and p != prev:
+                ids.append(p)
+                frames.append(t)
+            prev = p
+        if not ids:
+            return "", []
+        pieces = tok.ids_to_tokens(ids)
+        groups: list[list[int]] = []
+        for i, piece in enumerate(pieces):
+            if not groups or piece.startswith("▁"):
+                groups.append([])
+            groups[-1].append(i)
+        words = []
+        for g in groups:
+            word = tok.ids_to_text([ids[i] for i in g]).strip()
+            if word:
+                words.append(WordSegment(
+                    word=word,
+                    start_s=offset_s + frames[g[0]] * frame_s,
+                    end_s=offset_s + (frames[g[-1]] + 1) * frame_s,
+                ))
+        return tok.ids_to_text(ids).strip(), words
 
     def _transcribe_hf(
         self, chunks: list[AudioChunk],
