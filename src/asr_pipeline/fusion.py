@@ -170,6 +170,16 @@ def fusion_grammar(tag: str, think: bool = True) -> str:
         'line ::= [^\\n]+\n')
 
 
+def _context_line(role: Optional[str], text: str, max_words: int = 40) -> str:
+    """The previous segment, as shown to the judge for speaker continuity:
+    its role (if known) and its last `max_words` words."""
+    words = (text or "").split()
+    tail = " ".join(words[-max_words:])
+    if len(words) > max_words:
+        tail = "… " + tail
+    return f"{role or 'speaker unknown'}: {tail}" if tail else "(silence)"
+
+
 def _strip_think(text: str) -> str:
     """Return the post-reasoning body: drop everything up to and including
     </think> so a stray "[bn]"/"@ROLE" inside the reasoning can't match. A
@@ -724,6 +734,10 @@ class FusionTranslator:
                            "CTC witness text unchanged (no translation)")
             return list(ctc_texts), [""] * len(ctc_texts)
         bn_out, en_out = [], []
+        # Speaker continuity: prompts with a $previous placeholder get the
+        # previous segment's reconciled text and role (segments are cut at
+        # ~15 s and often continue the same speaker's sentence).
+        previous = "(start of the recording)"
         for i, (tt, whyps) in enumerate(zip(ctc_texts, whisper_nbest)):
             tt = (tt or "").strip()
             whyps = [h.strip() for h in (whyps or []) if h and h.strip()]
@@ -735,9 +749,11 @@ class FusionTranslator:
             if not wt:                     # only one witness → pass through
                 bn_out.append(tt)
                 en_out.append("")
+                previous = _context_line(None, tt)
                 continue
             prompt = tpl.safe_substitute(literal=tt or "(none)",
-                                         fluent=self._fmt_fluent(whyps))
+                                         fluent=self._fmt_fluent(whyps),
+                                         previous=previous)
             try:
                 # role-labelled [bn] + [en] turns + reasoning in one call;
                 # meta carries the truncation signal (finish_reason) and
@@ -756,6 +772,7 @@ class FusionTranslator:
                                              error=type(ex).__name__)
             bn_out.append(" ".join(t[1] for t in turns if t[1]))
             en_out.append(" ".join(t[2] for t in turns if t[2]))
+            previous = _context_line(turns[-1][0], turns[-1][1])
             if (i + 1) % 25 == 0:
                 logger.info("    fused+translated %d/%d", i + 1,
                             len(ctc_texts))
@@ -784,8 +801,12 @@ class FusionTranslator:
                 bn_out[i] = tt
                 continue
             idxs.append(i)
+            # batched: no reconciled previous turn yet → raw previous text
+            prev_raw = (ctc_texts[i - 1] or "").strip() if i else ""
             prompts.append(tpl.safe_substitute(
-                literal=tt or "(none)", fluent=self._fmt_fluent(whyps)))
+                literal=tt or "(none)", fluent=self._fmt_fluent(whyps),
+                previous=(_context_line(None, prev_raw) if prev_raw
+                          else "(start of the recording)")))
         logger.info("  Fusion 2/2 (server, %d slots): %d segments",
                     self._n_parallel, len(prompts))
         answers = server.generate_batch(

@@ -47,7 +47,7 @@ fusion_prompt: |
 
   SCRIPT: write every word in Devanagari, keeping only genuine English code-switches (NGO, loan, bank name, program) in Latin. If unsure whether a word is English, write it in Devanagari. For an unclear Nepali word, keep it in Devanagari or mark [अस्पष्ट].
 
-  ROLES: label each speaker turn from WHAT IS SAID. ENUMERATOR = the interviewer: asks the survey questions, reads the consent/recording script, gives instructions, probes. RESPONDENT = the interviewee: answers, describing their own family, livelihood, age, floods, landslides, crops, money, land. Most utterances are one turn. When the utterance holds a question AND its answer, write two turns in spoken order, splitting only where the speaker changes and keeping every word in exactly one turn.
+  ROLES: label each speaker turn from WHAT IS SAID. ENUMERATOR = the interviewer: reads the consent/recording script, introduces topics, asks the questions ("…हुन्छ?", "…भन्नुहोस्", "…कस्तो छ?"), gives instructions, probes and acknowledges ("हजुर", "ठिक छ") before the next question. RESPONDENT = the interviewee: answers, describing their own business, work, family, income, customers, problems and plans. The audio is cut into pieces of about 15 seconds, so a piece often CONTINUES the sentence of the PREVIOUS piece (shown below): keep the previous speaker for that continuation, and start a new turn only where the speaker clearly changes (a question is followed by its answer, or an answer by the next question). When the piece holds a question AND its answer, write two turns in spoken order, splitting exactly where the speaker changes and keeping every word in exactly one turn. Use the previous piece only to decide who is speaking; do not copy its words.
 
   Output a strippable <think> block (1–2 short sentences, no more), then one labelled turn per speaker, each turn exactly three lines:
   <think> who is speaking + what's asked/answered (and where the turn changes, if it does); any content word you overrode and why — keep it to 1–2 short sentences </think>
@@ -56,5 +56,6 @@ fusion_prompt: |
   [en] natural meaning-faithful English of YOUR [ne]; render it entirely in English, keeping only genuine code-switches (place/proper names); unrecoverable → [unclear]
   On the [ne] and [en] lines, write ONLY the final reconciled text as plain prose; put any reasoning, arrows, or alternatives in the reasoning block above.
 
+  PREVIOUS piece (speaker continuity only): $previous
   LITERAL: $literal
   FLUENT (candidate readings): $fluent

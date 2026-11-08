@@ -142,7 +142,8 @@ def test_nepali_prompt_is_consistent_with_profile():
     # no Bengali-script leftovers from the template it was adapted from
     assert not any("ঀ" <= ch <= "৿" for ch in prompt)
     for text in (prompt, _strip_think_instruction(prompt)):
-        filled = Template(text).safe_substitute(literal="X", fluent="Y")
+        filled = Template(text).safe_substitute(literal="X", fluent="Y",
+                                                previous="Z")
         assert not re.findall(r"\$[a-zA-Z_]+", filled)
     assert "<think>" not in _strip_think_instruction(prompt)
 
@@ -180,3 +181,23 @@ def test_fusion_grammar_uses_profile_tag_and_roles():
     assert '"[ne] "' in g and '"[en] "' in g
     assert '"ENUMERATOR" | "RESPONDENT"' in g
     assert "think?" not in fusion_grammar("ne", think=False)
+
+
+def test_previous_segment_context_line():
+    from asr_pipeline.fusion import _context_line
+    assert _context_line("ENUMERATOR", "के तपाईँ सहमत हुनुहुन्छ") == \
+        "ENUMERATOR: के तपाईँ सहमत हुनुहुन्छ"
+    long = " ".join(["शब्द"] * 50)
+    line = _context_line(None, long, max_words=40)
+    assert line.startswith("speaker unknown: … ")
+    assert len(line.split()) == 3 + 40
+    assert _context_line("RESPONDENT", "") == "(silence)"
+
+
+def test_bengali_prompt_has_no_previous_placeholder():
+    # opt-in per language: the validated Bengali prompt is unchanged
+    from asr_pipeline.fusion import load_prompts
+    assert "$previous" not in load_prompts(
+        str(load_profile("ben").prompt_path))["fusion_prompt"]
+    assert "$previous" in load_prompts(
+        str(load_profile("nep").prompt_path))["fusion_prompt"]
