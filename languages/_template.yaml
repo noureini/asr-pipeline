@@ -37,3 +37,15 @@ prompt_file: config/prompts/xxx_survey.yaml
 # name: DEVANAGARI, BENGALI, ARABIC, LATIN …). Others are blanked.
 scripts: [LATIN]
 unclear_marker: "[unclear]"    # native-language "unclear" marker
+
+# Optional: how the audio is cut for this language (default: shared config,
+# pieces of up to 15 s cut at silences). Uncomment to override.
+#   max_duration_s   longest piece; keep it within what BOTH witnesses
+#                    handle well (Whisper: 30 s window; most CTC fine-tunes
+#                    were trained on clips under ~20 s).
+#   split_on_pause_s also close a piece at any pause this long, so a piece
+#                    mostly holds one speaker. Tune to the language's
+#                    turn-taking rhythm (0.4-0.8 s typical); null = off.
+# chunking:
+#   max_duration_s: 15
+#   split_on_pause_s: null

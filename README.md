@@ -47,7 +47,7 @@ flowchart LR
 | Step | What happens | Where |
 |---|---|---|
 | **0 · Check** | Each recording is scored 0–100 (SNR, clipping, silence) and flagged EXCELLENT … BROKEN in one Excel report. Broken files are caught before any GPU time is spent. No GPU or token needed. | `scripts/audio_quality_report.py` |
-| **1 · Preprocess** | Resample to 16 kHz mono (soxr), Silero VAD finds speech, speech is cut into chunks of ≤ 15 s with 2 s overlap. | `preprocessor.py` |
+| **1 · Preprocess** | Resample to 16 kHz mono (soxr), Silero VAD finds speech, speech is cut **at silences** into pieces of ≤ 15 s (no overlap, no word is cut in half). Piece length and pause cuts can be set per language ([How the audio is cut](#how-the-audio-is-cut)). | `preprocessor.py` |
 | **2a · Witness 1: sound** | **titu** FastConformer-CTC transcribes each chunk *acoustically*: faithful to how names, numbers and dialect words sounded; emits word timestamps. | `engines/ctc_engine.py`, `languages/ben.yaml` |
 | **2b · Witness 2: structure** | **Regional Whisper-medium** transcribes the same chunk *fluently*, returning **3 readings (N-best)** via seeded sampling so the judge sees where it is unsure (*ward* vs *world*). | `fusion.py` |
 | **3 · Reconcile** | **Gemma-3-12B** (4-bit, local, temperature 0) reads both witnesses and, in **one call** per segment: reconciles them into one Bengali line, translates it to English, and labels each turn **ENUMERATOR / RESPONDENT** *from what is said*. A segment holding a question *and* its answer is split into two turns. Its reasoning is kept for audit. | `fusion.py`, `config/prompts/bn_survey.yaml` |
@@ -314,6 +314,35 @@ The shared settings that matter most:
 | `fusion.ger_guard` | `true` | Number-abstain, foreign-script and agreement checks |
 | `fusion.ger_snap` | `false` | Snap-to-witness stays off until calibrated (`just calibrate-ger name.reasoning.txt`) |
 
+### How the audio is cut
+
+Both witnesses and the judge work on the same pieces of audio, so how the
+audio is cut matters:
+
+1. **Silero VAD** marks where speech is (`preprocessing.vad`: threshold 0.5,
+   speech ≥ 250 ms, silences ≥ 350 ms kept as gaps).
+2. **Greedy merge** (as in WhisperX): consecutive speech regions are joined
+   into one piece until adding the next would pass `max_duration_s`. A piece
+   only ever ends **at a silence**, so no word is cut in half and pieces do
+   not overlap. A single region longer than the limit is kept whole.
+3. *(optional)* **Pause cut:** with `split_on_pause_s` set, a piece is also
+   closed at any pause at least that long. Speaker changes usually come with
+   a pause, so pieces then mostly hold one speaker.
+
+The right values depend on the **language and its models**, so a profile can
+override them with a `chunking:` block (see
+[`languages/_template.yaml`](languages/_template.yaml)):
+
+| Setting | Shared default | Depends on |
+|---|---|---|
+| `max_duration_s` | `15` | What both witnesses handle well: Whisper sees 30 s at most; CTC fine-tunes are mostly trained on clips under ~20 s and degrade on longer ones. Longer pieces give the judge more context but mix more speakers. |
+| `split_on_pause_s` | off | Turn-taking rhythm of the language and survey style (0.4–0.8 s typical). Shorter pieces mean more judge calls (slower). |
+
+Bengali and Nepali both use the shared defaults. On 15 minutes of a Nepali
+interview, a 0.5 s pause cut changed neither transcript accuracy (CER 22.4% →
+22.1%) nor role accuracy (86.5% → 86.6% of words), so it stays off. (The
+fixed-window fallback with 2 s overlap is only used when VAD is disabled.)
+
 **Prompt.** The judge's instructions (dialect glossary, domain priors, number
 rules, role definitions) live in the file the profile names; for Bengali
 [`config/prompts/bn_survey.yaml`](config/prompts/bn_survey.yaml). Edit the
@@ -334,13 +363,16 @@ multilingual and is shared. Everything language-specific is one profile file:
 | `tag` | Line tag in the judge reply and transcript (`[bn]`, `[ne]` …) | `bn` |
 | `scripts` | Unicode scripts allowed in the output; anything else is blanked | `[BENGALI, LATIN]` |
 | `unclear_marker` | Written for unintelligible spans and fabricated numbers | `[অস্পষ্ট]` |
+| `chunking` *(optional)* | Piece length and pause cuts for this language ([How the audio is cut](#how-the-audio-is-cut)) | shared defaults |
 
 Digits need no setting: the number guard compares digits of any script by
 value (৬০ = ६० = 60).
 
 Witness models may also need these per-model settings: `decoder: ctc` for
 hybrid NeMo checkpoints (CTC + RNN-T heads; the witness must use the CTC
-head), `ct2_subfolder` when the repo already ships a CTranslate2 copy, and
+head), `language_head` for AI4Bharat multi-language IndicConformer checkpoints
+(e.g. `ne`; loaded in stock NeMo through NVIDIA's compatibility patches in
+`engines/indic_multisoftmax.py`), `ct2_subfolder` when the repo already ships a CTranslate2 copy, and
 `prefix_tokens` for Whisper fine-tunes with mode tokens (e.g. Sagarmatha's
 `<|mixed|>`, `<|verbatim|>`).
 
@@ -391,6 +423,11 @@ free. Measured on 100 FLEURS clips (read speech) in this repo:
 | Nepali: AI Lab IndicConformer + AI Lab Whisper (same data) | 40.5% | 43.3% | 37.2% | 63% | 25% | 25% |
 | Nepali: Blackfire XLS-R + AI Lab Whisper | 38.1% | 43.3% | 34.6% | 57% | 29% | 31% |
 | Nepali: Blackfire XLS-R + Sagarmatha V6 | 38.1% | 25.4% | 24.1% | 56% | 44% | 11% |
+| **Nepali: AI4Bharat IndicConformer (CTC) + Sagarmatha V6** (current) | 27.9% | 25.4% | 21.9% | n/a | n/a | n/a |
+
+A simpler floor to compare pairs: the share of reference words **neither**
+witness got right (no judge can recover them). Bengali pair: 13.5%; Nepali
+AI4Bharat + Sagarmatha: 17.7%; Nepali AI Lab pair: 26%.
 
 What to aim for, using the validated Bengali pair as the yardstick:
 - **Shared errors around 40% or lower.** At 60%, Gemma's reconciliation on
@@ -449,12 +486,20 @@ behave differently.
 - Some judges drop the `[tag]` / `[en]` labels; count format failures
   separately from accuracy.
 
-**Nepali status:** [`languages/nep.yaml`](languages/nep.yaml) is a **draft**
-(AI Lab pair, 63% shared errors). The best measured witness 2 is Sagarmatha V6
-(25.4% WER). The strongest witness 1 on kriti's benchmark (AI4Bharat Nepali
-IndicConformer, CTC head, CER 8.5%; gated) is still to be measured with it.
-The prompt ([`config/prompts/ne_survey.yaml`](config/prompts/ne_survey.yaml))
-needs a native-speaker review.
+**Nepali status:** [`languages/nep.yaml`](languages/nep.yaml) uses the best
+measured pair: **AI4Bharat IndicConformer** (CTC head, `language_head: ne`;
+gated: accept its terms on Hugging Face first) + **Sagarmatha V6** (verbatim
+mode). The other measured pairs are kept in
+[`languages/candidates/`](languages/candidates/). On the first 15 minutes of a
+real Nepali survey interview (phone-quality, two speakers), the fused
+transcript reached **CER ≈ 22%** against a human transcript after spelling
+normalisation; most remaining differences are style (fillers kept by verbatim
+mode), spelling variants and names. Role labels were right for ~86% of words;
+the judge most often labels the interviewer's procedural lines (consent,
+contact details) as RESPONDENT. The prompt
+([`config/prompts/ne_survey.yaml`](config/prompts/ne_survey.yaml)) still needs
+a native-speaker review, and its domain priors (household, climate) should be
+adapted to each survey.
 
 ## Other languages without a profile (general path)
 
