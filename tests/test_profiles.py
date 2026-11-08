@@ -201,3 +201,19 @@ def test_bengali_prompt_has_no_previous_placeholder():
         str(load_profile("ben").prompt_path))["fusion_prompt"]
     assert "$previous" in load_prompts(
         str(load_profile("nep").prompt_path))["fusion_prompt"]
+
+
+def test_profile_chunking_overrides_shared_config():
+    from asr_pipeline.config import AppConfig
+    from asr_pipeline.pipeline import ASRPipeline
+    from asr_pipeline.profiles import ChunkingOverride
+    cfg = AppConfig()
+    pipe = ASRPipeline.__new__(ASRPipeline)        # no model loading
+    pipe._config = cfg
+    p = load_profile("ben").model_copy(
+        update={"chunking": ChunkingOverride(split_on_pause_s=0.5)})
+    pipe._apply_profile_chunking(p)
+    assert cfg.preprocessing.chunking.split_on_pause_s == 0.5
+    assert cfg.preprocessing.chunking.max_duration_s == 15    # untouched
+    pipe._apply_profile_chunking(load_profile("ben"))          # no override
+    assert cfg.preprocessing.chunking.split_on_pause_s == 0.5

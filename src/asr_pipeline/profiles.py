@@ -66,6 +66,15 @@ class WhisperWitness(BaseModel):
     prefix_tokens: list[str] = Field(default_factory=list)
 
 
+class ChunkingOverride(BaseModel):
+    """How the audio is cut into pieces for this language (overrides the
+    shared preprocessing.chunking). Depends on the witness models (maximum
+    piece length) and on turn-taking rhythm (pause between speakers)."""
+
+    max_duration_s: Optional[int] = None
+    split_on_pause_s: Optional[float] = None
+
+
 class LanguageProfile(BaseModel):
     code: str                               # ISO 639-3, matches `-l`
     name: str
@@ -79,6 +88,8 @@ class LanguageProfile(BaseModel):
     # treated as a cross-lingual hallucination and blanked.
     scripts: list[str] = Field(default_factory=lambda: ["LATIN"])
     unclear_marker: str = "[unclear]"       # written for unintelligible text
+    # Optional per-language chunking (None = shared config).
+    chunking: Optional[ChunkingOverride] = None
 
     @field_validator("scripts")
     @classmethod

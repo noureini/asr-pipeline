@@ -124,6 +124,19 @@ class ASRPipeline:
                 self._ctc = None
         return self._profile
 
+    def _apply_profile_chunking(self, profile: LanguageProfile) -> None:
+        """Per-language chunking (profile.chunking) overrides the shared
+        preprocessing.chunking for this run."""
+        if profile.chunking is None:
+            return
+        chunking = self._config.preprocessing.chunking
+        for key, value in profile.chunking.model_dump().items():
+            if value is not None:
+                setattr(chunking, key, value)
+        logger.info(f"  chunking ({profile.code} profile): "
+                    f"max {chunking.max_duration_s}s, cut at pauses ≥ "
+                    f"{chunking.split_on_pause_s}s")
+
     # ─────────────────────────────────────────────────────────────────
     # Public API
     # ─────────────────────────────────────────────────────────────────
@@ -167,7 +180,7 @@ class ASRPipeline:
         # Fusion path: load + validate the language profile up front, so a
         # missing/invalid languages/<code>.yaml fails before any GPU work.
         if self._config.postprocessing.translation_backend == "fusion":
-            self._profile_for(language)
+            self._apply_profile_chunking(self._profile_for(language))
 
         # Override speaker counts if provided
         if min_speakers is not None:
