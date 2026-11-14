@@ -1,14 +1,21 @@
-# ASR Pipeline: Bengali Survey Transcription
+# ASR Pipeline: Survey Interview Transcription
 
-A fully local, open-source pipeline that turns Bengali survey interviews
-(coastal Bangladesh, climate-risk study) into clean transcripts with an English
-translation, speaker roles and a short human-review worklist. Everything runs
-on one laptop GPU with 8 GB VRAM. No audio, text or translation leaves the
-machine.
+A fully local, open-source pipeline that turns survey interviews in
+low-resource languages into clean transcripts with an English translation,
+speaker roles and a short human-review worklist. Everything runs on one laptop
+GPU with 8 GB VRAM. No audio, text or translation leaves the machine.
+
+Each language is one profile file in [`languages/`](languages/):
+
+| Language | Profile | Status |
+|---|---|---|
+| Bengali | [`ben.yaml`](languages/ben.yaml) | Validated (coastal Bangladesh, climate-risk study) |
+| Nepali | [`nep.yaml`](languages/nep.yaml) | Tested on a real interview; prompt awaits native-speaker review ([status](#adding-a-language)) |
 
 It is the code behind the presentation in
 [`docs/presentation/`](docs/presentation/) (*Fully local AI transcription with
-built-in QA*).
+built-in QA*), which describes the Bengali pipeline. Examples below use
+Bengali; add `nep` (or any profile code) to run another language.
 
 ---
 
@@ -492,20 +499,32 @@ behave differently.
 measured pair: **AI4Bharat IndicConformer** (CTC head, `language_head: ne`;
 gated: accept its terms on Hugging Face first) + **Sagarmatha V6** (verbatim
 mode). The other measured pairs are kept in
-[`languages/candidates/`](languages/candidates/). On the first 15 minutes of a
-real Nepali survey interview (phone-quality, two speakers), the fused
-transcript reached **CER ≈ 22%** against a human transcript after spelling
-normalisation; most remaining differences are style (fillers kept by verbatim
-mode), spelling variants and names. Role labels were right for ~86% of words;
-the judge most often labels the interviewer's procedural lines (consent,
-contact details) as RESPONDENT. The prompt
+[`languages/candidates/`](languages/candidates/).
+
+Tested on a real Nepali survey interview (70 min, phone quality, two
+speakers), against the human transcript (8,916 words), with fillers and
+spelling variants normalised:
+
+| | WER | CER |
+|---|---|---|
+| CTC witness alone | 49.7% | 27.7% |
+| **Fused output** | **43.1%** | **25.7%** |
+| Fused output, first 15 min only | 38.0% | 22.4% |
+
+Most remaining differences are style (fillers kept by Sagarmatha's verbatim
+mode, removed by the human transcriber), spelling variants and names. The
+full run took 3.5 h on a 6 GB laptop GPU (Gemma partly on CPU) and flagged
+76 of 369 segments for review. **Roles are the weak point on Nepali**: right
+for 86% of words in the first 15 min but 67% over the whole interview, where
+the judge labels most interviewer lines RESPONDENT. Treat Nepali role labels
+as a draft. The prompt
 ([`config/prompts/ne_survey.yaml`](config/prompts/ne_survey.yaml)) still needs
 a native-speaker review, and its domain priors (household, climate) should be
 adapted to each survey.
 
 ## Other languages without a profile (general path)
 
-For languages other than Bengali, the pipeline uses a single ASR engine
+For languages without a profile in `languages/`, the pipeline uses a single ASR engine
 (Whisper large-v3 for high-resource languages, Omnilingual ASR for 1,600+
 others), pyannote diarization, and a local LLM for correction/translation.
 This path does not have the two-witness fusion or the review worklist.
