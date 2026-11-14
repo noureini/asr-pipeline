@@ -1,0 +1,22 @@
+# Nepali candidate: AI4Bharat Nepali IndicConformer, CTC head (MIT, gated;
+# best open Nepali model on the kriti 19-system benchmark: CER 8.5% with
+# CTC) + AI Lab Whisper-turbo (OpenSLR 54, CS lectures, YouTube).
+code: nep
+name: Nepali
+tag: ne
+witness_ctc:
+  backend: nemo
+  model: ai4bharat/indicconformer_stt_ne_hybrid_ctc_rnnt_large
+  revision: cd09ba7720f3b17d259f6bfd03e1463bc5ba517d
+  nemo_file: indicconformer_stt_ne_hybrid_rnnt_large.nemo
+  decoder: ctc
+  language_head: ne            # AI4Bharat-fork multi-softmax checkpoint
+  batch_size: 8
+witness_whisper:
+  model: ailabpvtltd/whisper-large-v3-turbo-nepali-english-codemix-asr  # CC BY-NC 4.0
+  revision: 8eff5c489628694a9f3ff2a02f3225ccfd6c6046
+  language: ne
+  ct2_path: models/ailab_whisper_ne_ct2
+prompt_file: config/prompts/ne_survey.yaml
+scripts: [DEVANAGARI, LATIN]
+unclear_marker: "[अस्पष्ट]"

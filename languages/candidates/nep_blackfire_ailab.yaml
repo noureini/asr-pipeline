@@ -1,0 +1,18 @@
+# Nepali candidate: Blackfire XLS-R CTC (IndicVoices-heavy) + AI Lab Whisper
+# (OpenSLR 54, CS lectures, YouTube). Shared data: OpenSLR 54/43 only.
+code: nep
+name: Nepali
+tag: ne
+witness_ctc:
+  backend: hf
+  model: BlackfireAI/nepali-asr-xlsr-300m        # CC BY-NC-SA 4.0
+  revision: 5caaec8a6407cefb7baf0c334c36f825f1ed3903
+  batch_size: 8
+witness_whisper:
+  model: ailabpvtltd/whisper-large-v3-turbo-nepali-english-codemix-asr  # CC BY-NC 4.0
+  revision: 8eff5c489628694a9f3ff2a02f3225ccfd6c6046
+  language: ne
+  ct2_path: models/ailab_whisper_ne_ct2
+prompt_file: config/prompts/ne_survey.yaml
+scripts: [DEVANAGARI, LATIN]
+unclear_marker: "[अस्पष्ट]"

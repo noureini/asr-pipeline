@@ -1,7 +1,7 @@
 """Training-free GER (generative error correction) guard for fusion output.
 
-The fusion LLM (Gemma-3-12B) free-generates a reconciled Bengali [bn] from the
-witness pool — titu (LITERAL) + Whisper N-best (FLUENT). For a 12B the
+The fusion LLM (Gemma-3-12B) free-generates a reconciled native-language line from the
+witness pool — the CTC witness (LITERAL) + Whisper N-best (FLUENT). For a 12B the
 literature says UNCONSTRAINED free-text correction is the wrong mode: it can
 drift off the acoustic evidence (hallucinate) and, worst for a survey, fabricate
 NUMBERS. This module is the deterministic, character-distance-based guard that
@@ -14,8 +14,8 @@ constrains that output WITHOUT retraining:
   3. agreement-gating — witnesses agree but [bn] drifted, or witnesses disagree
      (a genuinely hard segment) → flag.
 
-All distances are over BENGALI GRAPHEME CLUSTERS (base char + its combining
-vowel signs / virama), not raw codepoints: char-level Levenshtein over Bengali
+All distances are over GRAPHEME CLUSTERS (base char + its combining
+vowel signs / virama), not raw codepoints: char-level Levenshtein over Indic scripts
 over-penalises combining marks and makes the thresholds meaningless.
 
 Pure-python, no model, no extra deps — unit-tested in tests/test_ger_guard.py.
@@ -26,12 +26,13 @@ import re
 import unicodedata
 from dataclasses import dataclass, field
 
-# Bengali digits ০-৯ → ASCII 0-9 so number VALUES compare regardless of script.
-_BENGALI_DIGIT_MAP = {ord(b): ord(a)
-                      for a, b in zip("0123456789", "০১২৩৪৫৬৭৮৯")}
-# Punctuation / whitespace to drop before comparison: titu emits none, Gemma
-# adds dandas/commas — comparing those would inflate the distance spuriously.
-_PUNCT = re.compile(r"[\s।,.;:!?\-—–…\"'`()\[\]{}/০-৯0-9]+")
+# Default script rules (Bengali profile): what may appear in a transcript and
+# what an unintelligible span is replaced with. Profiles pass their own.
+DEFAULT_SCRIPTS = ("BENGALI", "LATIN")
+# Punctuation / whitespace / digits (any script: \d is Unicode-aware) to drop
+# before comparison: the CTC witness emits no punctuation, the judge adds
+# dandas/commas — comparing those would inflate the distance spuriously.
+_PUNCT = re.compile(r"[\s।॥,.;:!?\-—–…\"'`()\[\]{}/\d]+")
 _ZW = ("‍", "‌")  # ZWJ / ZWNJ — attach to the preceding cluster
 
 
@@ -87,49 +88,58 @@ def ndist(a: str, b: str) -> float:
     return edit_distance(ga, gb) / max(len(ga), len(gb), 1)
 
 
+def _ascii_digits(run: str) -> str:
+    """A digit run in any script (০১২, १२३, 123) → its ASCII value string."""
+    return "".join(str(unicodedata.decimal(c)) for c in run)
+
+
 def numbers(s: str) -> set[str]:
-    """Digit-number VALUES in the text (Bengali digits normalised to ASCII)."""
-    return set(re.findall(r"\d+", (s or "").translate(_BENGALI_DIGIT_MAP)))
+    """Digit-number VALUES in the text, normalised to ASCII so Bengali,
+    Devanagari and ASCII digits compare by value."""
+    return {_ascii_digits(m) for m in re.findall(r"\d+", s or "")}
 
 
-def _char_ok(ch: str) -> bool:
-    """Allowed in a Bengali [bn]: the Bengali block (incl. Bengali digits),
-    ASCII (Latin code-switches + digits + punctuation), zero-width joiners, and
-    any Unicode punctuation/separator/control. ANY other script (Cyrillic, CJK,
-    Devanagari letters, …) means a cross-lingual LLM hallucination."""
-    if 0x0980 <= ord(ch) <= 0x09FF:           # Bengali block
+def _char_ok(ch: str, scripts: tuple[str, ...] = DEFAULT_SCRIPTS) -> bool:
+    """Allowed in a transcript: characters of the allowed scripts (first word
+    of the Unicode name: BENGALI, DEVANAGARI, LATIN …), ASCII (code-switches,
+    digits, punctuation), zero-width joiners, and any Unicode punctuation /
+    separator / control. ANY other script (Cyrillic, CJK …) means a
+    cross-lingual LLM hallucination."""
+    if ch.isascii() or ch in _ZW:
         return True
-    if ch.isascii():                          # Latin letters/digits/punct/space
+    if unicodedata.category(ch)[0] in ("P", "Z", "C"):
         return True
-    if ch in _ZW:
-        return True
-    return unicodedata.category(ch)[0] in ("P", "Z", "C")
+    try:
+        return unicodedata.name(ch).split()[0] in scripts
+    except ValueError:                        # unassigned codepoint
+        return False
 
 
-def foreign_tokens(s: str) -> list[str]:
-    """Whitespace tokens containing a character outside the allowed
-    Bengali+Latin scripts — e.g. Cyrillic «хозяйства», CJK. These are LLM
-    hallucinations, never transcribed speech."""
+def foreign_tokens(s: str,
+                   scripts: tuple[str, ...] = DEFAULT_SCRIPTS) -> list[str]:
+    """Whitespace tokens containing a character outside the allowed scripts
+    — e.g. Cyrillic «хозяйства» in Bengali. These are LLM hallucinations,
+    never transcribed speech."""
     return [tok for tok in (s or "").split()
-            if any(not _char_ok(c) for c in tok)]
+            if any(not _char_ok(c, scripts) for c in tok)]
 
 
-_ABSTAIN_BN = "[অস্পষ্ট]"
+_ABSTAIN_BN = "[অস্পষ্ট]"   # default (Bengali) unclear marker
 _ABSTAIN_EN = "[unclear]"
 
 
 def _blank_fabricated(text: str, fabricated: set[str], marker: str) -> str:
     """Replace each digit-run whose VALUE is in `fabricated` with `marker`.
-    Operates on the raw text so the original (Bengali or ASCII) digits are
+    Operates on the raw text so the original digits (any script) are
     matched, but compares normalised values."""
     if not text or not fabricated:
         return text
 
     def repl(m: "re.Match") -> str:
-        val = m.group(0).translate(_BENGALI_DIGIT_MAP)
-        return marker if val in fabricated else m.group(0)
+        return marker if _ascii_digits(m.group(0)) in fabricated \
+            else m.group(0)
 
-    return re.sub(r"[0-9০-৯]+", repl, text)
+    return re.sub(r"\d+", repl, text)
 
 
 @dataclass
@@ -153,6 +163,8 @@ def assess(
     agree_tau: float = 0.30,
     disagree_tau: float = 0.55,
     deviate_tau: float = 0.55,
+    scripts: tuple[str, ...] = DEFAULT_SCRIPTS,
+    unclear_marker: str = _ABSTAIN_BN,
 ) -> GerVerdict:
     """Constrain + audit one fused [bn] against its witness pool.
 
@@ -197,18 +209,18 @@ def assess(
         wit_nums |= numbers(w)
     fabricated = (numbers(bn) - wit_nums) if wit_nums else set()
     if fabricated:
-        v.bn = _blank_fabricated(v.bn, fabricated, _ABSTAIN_BN)
+        v.bn = _blank_fabricated(v.bn, fabricated, unclear_marker)
         v.en = _blank_fabricated(v.en, fabricated, _ABSTAIN_EN)
         v.reasons.append("number-abstain:" + ",".join(sorted(fabricated)))
 
     # ── foreign-script ABSTAIN (deterministic) ──
-    # A [bn] token outside Bengali+Latin (e.g. Cyrillic "хозяйства", CJK) is an
+    # A token outside the allowed scripts (e.g. Cyrillic "хозяйства", CJK) is an
     # LLM cross-lingual hallucination — blank it (don't ship it) and flag for
     # review. Catches what temperature/prompt rules can't guarantee.
-    foreign = foreign_tokens(v.bn)
+    foreign = foreign_tokens(v.bn, scripts)
     if foreign:
         for t in foreign:
-            v.bn = v.bn.replace(t, _ABSTAIN_BN)
+            v.bn = v.bn.replace(t, unclear_marker)
             v.en = v.en.replace(t, _ABSTAIN_EN)  # if it leaked into [en] too
         v.reasons.append("foreign-script:" + ",".join(foreign[:5]))
 

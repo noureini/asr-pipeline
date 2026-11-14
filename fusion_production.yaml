@@ -1,16 +1,14 @@
 # =============================================================================
-# Production pipeline: titu ASR + two-witness fusion (+ in-call translation)
+# Production pipeline: two-witness fusion (shared by every language)
 # =============================================================================
-# The validated, fully-local, fully-open, hallucination-resistant stack:
+#   CTC witness (sound)  +  Whisper witness (structure, N-best x3)
+#     -> Gemma-3-12B-it Q4 reconciles both, translates to English and labels
+#        each turn ENUMERATOR / RESPONDENT in ONE call -> deterministic guards
 #
-#   titu (CTC, phonetic)  ‖  Whisper-regional (seq2seq, CT2, fluent)  2 witnesses
-#     → Gemma-3-12B-it UD-Q4 reconciles into clean Bengali [bn], translates to
-#       English [en] AND labels each turn ENUMERATOR / RESPONDENT in ONE call
-#
-# titu is the primary engine (Stage 3, gives the .raw.txt). Whisper runs as
-# the second witness inside the fusion stage (Stage 6). Recovers semantic
-# near-misses (flood vs "sister-no"), fixes proper nouns from the phonetic
-# witness (Pubali Bank, SSC), keeps numbers/entities faithful.
+# The language-specific parts (the two witness models, the judge prompt, the
+# allowed scripts) live in languages/<code>.yaml and are picked by `-l`:
+#   just fusion interview.m4a ben
+# This file holds what is shared: VAD, the judge model, decoding, guards.
 # =============================================================================
 
 pipeline:
@@ -20,15 +18,6 @@ pipeline:
   num_workers: 4
   output_dir: "./outputs/v2_deliverable"
   low_vram: true
-  force_engine: "titu"          # primary ASR / witness #1
-
-titu:
-  # Witness #1 model. fastconformer = validated default (complements dialectal
-  # Whisper in fusion). conformer_large = A/B (more dialect/content). See
-  # the archive/experiments branch (scripts/ab_titu_variants.py).
-  model_id: "hishab/titu_stt_bn_fastconformer"
-  revision: "993316b17c3db56a42bf0140b8ad524f35b4677b"   # pinned HF commit
-  batch_size: 8
 
 preprocessing:
   target_sample_rate: 16000
@@ -55,12 +44,12 @@ diarization:
   enabled: false
 
 alignment:
-  # OFF by design: titu emits native CTC word timestamps (validated CLEAN —
+  # OFF by design: the CTC witness emits native word timestamps (validated CLEAN —
   # 534/534, 0 issues), so no forced aligner is needed. MMS_FA is a no-op on
   # Bengali (strips non-Latin); arijitx wav2vec2 was A/B-tested (2026-06-25) and
   # DRIFTS ~2.15s median on this 8kHz dialectal audio, scrambling speaker
-  # attribution. titu-native timestamps are the source of truth.
-  enabled: false                 # forced alignment disabled (titu CTC times used directly)
+  # attribution. CTC-native timestamps are the source of truth.
+  enabled: false                 # forced alignment disabled (CTC word times used directly)
 
 # ---------------------------------------------------------------------------
 # Stage 6: two-witness fusion + translation + speaker roles (one Gemma call)
@@ -68,9 +57,6 @@ alignment:
 postprocessing:
   translation_backend: "fusion"
   fusion:
-    whisper_model: "bengaliAI/tugstugi_bengaliai-regional-asr_whisper-medium"
-    whisper_revision: "bc519b95ac986f4c732972320052fa1b2c217e8a"   # pinned HF commit
-    whisper_ct2_path: "models/tugstugi_ct2"   # CT2 batched N-best (~1.9x); HF fallback if missing
     gguf_repo: "unsloth/gemma-3-12b-it-GGUF"
     gguf_file: "gemma-3-12b-it-UD-Q4_K_XL.gguf"
     gguf_revision: "d15e4c7dc21dc55d56bf8549db57a71ad8a2a35d"     # pinned HF commit
@@ -109,15 +95,13 @@ postprocessing:
     ger_snap: false        # observe-mode first → calibrate ger_snap_tau
     ger_snap_tau: 0.72     # set from scripts/ger_calibrate.py, then ger_snap: true
     # Roles: labelled per turn inside this same fusion call (@ENUMERATOR /
-    # @RESPONDENT, see config/prompts/bn_survey.yaml). No diarization.
+    # @RESPONDENT, defined in the language profile's prompt). No diarization.
     # ── fusion backend ──
     # "server" continuous batching only helps a SMALL model that leaves
     # VRAM for KV slots (4B/8B). The 12B fills 8GB and PAGES with slots
     # (decode 1.75 tok/s — proven). So keep "inprocess" for the 12B.
     fusion_backend: "inprocess"
     n_parallel: 3
-    # ── prompt templates: edit the YAML, not the code ──
-    prompts_file: "config/prompts/bn_survey.yaml"
 
 output:
   format: "all"                  # txt + json + srt

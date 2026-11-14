@@ -159,7 +159,7 @@ def _seg(i, start, end, text):
 
 def _run_with_replies(replies, aligned, nbest):
     """Drive FusionTranslator.process with canned Gemma replies (no models)."""
-    ft = FusionTranslator(prompts_file=PROMPTS_FILE)
+    ft = FusionTranslator()            # default profile: languages/ben.yaml
     ft._run_whisper = lambda a, w: nbest
 
     def fake_fusion(a, titu, wn):
@@ -190,7 +190,7 @@ def test_roles_come_from_fusion_turns_and_split_question_answer():
 
 
 def test_ger_blanks_fabricated_number_per_turn_and_keeps_split():
-    ft = FusionTranslator(prompts_file=PROMPTS_FILE)
+    ft = FusionTranslator()            # default profile: languages/ben.yaml
     turns = [("ENUMERATOR", "বয়স কত?", "How old?"),
              ("RESPONDENT", "আমার বয়স ৬০", "I am 60")]
     titu, whyps = "বয়স কত আমার বয়স ৬", ["বয়স কত? আমার বয়স ৬।"]

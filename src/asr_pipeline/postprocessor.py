@@ -523,6 +523,7 @@ class GGUFProcessor:
         min_p: float | None = None,
         repeat_penalty: float | None = None,
         seed: int | None = None,
+        grammar: str | None = None,
     ) -> str | tuple[str, dict]:
         """Generate a completion. With return_meta=True, returns
         (text, meta) where meta = {"finish_reason", "completion_tokens"} —
@@ -558,6 +559,16 @@ class GGUFProcessor:
             sampling["repeat_penalty"] = repeat_penalty
         if seed is not None:
             sampling["seed"] = seed
+        # GBNF grammar (llama.cpp constrained decoding): only tokens that keep
+        # the output inside the grammar can be sampled, so the reply always
+        # has the required shape. Compiled once per grammar string.
+        if grammar:
+            cache = self.__dict__.setdefault("_grammars", {})
+            if grammar not in cache:
+                from llama_cpp import LlamaGrammar
+                cache[grammar] = LlamaGrammar.from_string(grammar,
+                                                          verbose=False)
+            sampling["grammar"] = cache[grammar]
 
         family = getattr(self, "_family", "unknown")
 
@@ -624,6 +635,8 @@ class GGUFProcessor:
                     temperature=temperature,
                     max_tokens=max_tokens,
                     top_p=top_p,
+                    **({"grammar": sampling["grammar"]}
+                       if "grammar" in sampling else {}),
                 )
                 choice = out["choices"][0]
                 msg = choice["message"]

@@ -1,14 +1,21 @@
-# ASR Pipeline: Bengali Survey Transcription
+# ASR Pipeline: Survey Interview Transcription
 
-A fully local, open-source pipeline that turns Bengali survey interviews
-(coastal Bangladesh, climate-risk study) into clean transcripts with an English
-translation, speaker roles and a short human-review worklist. Everything runs
-on one laptop GPU with 8 GB VRAM. No audio, text or translation leaves the
-machine.
+A fully local, open-source pipeline that turns survey interviews in
+low-resource languages into clean transcripts with an English translation,
+speaker roles and a short human-review worklist. Everything runs on one laptop
+GPU with 8 GB VRAM. No audio, text or translation leaves the machine.
+
+Each language is one profile file in [`languages/`](languages/):
+
+| Language | Profile | Status |
+|---|---|---|
+| Bengali | [`ben.yaml`](languages/ben.yaml) | Validated (coastal Bangladesh, climate-risk study) |
+| Nepali | [`nep.yaml`](languages/nep.yaml) | Tested on a real interview; prompt awaits native-speaker review ([status](#adding-a-language)) |
 
 It is the code behind the presentation in
 [`docs/presentation/`](docs/presentation/) (*Fully local AI transcription with
-built-in QA*).
+built-in QA*), which describes the Bengali pipeline. Examples below use
+Bengali; add `nep` (or any profile code) to run another language.
 
 ---
 
@@ -22,9 +29,10 @@ built-in QA*).
 6. [Reproducibility](#reproducibility)
 7. [Dependencies and why each is needed](#dependencies-and-why-each-is-needed)
 8. [Configuration](#configuration)
-9. [Other languages (general path)](#other-languages-general-path)
-10. [Repository layout](#repository-layout)
-11. [Troubleshooting](#troubleshooting)
+9. [Adding a language](#adding-a-language)
+10. [Other languages without a profile (general path)](#other-languages-without-a-profile-general-path)
+11. [Repository layout](#repository-layout)
+12. [Troubleshooting](#troubleshooting)
 
 ---
 
@@ -46,8 +54,8 @@ flowchart LR
 | Step | What happens | Where |
 |---|---|---|
 | **0 · Check** | Each recording is scored 0–100 (SNR, clipping, silence) and flagged EXCELLENT … BROKEN in one Excel report. Broken files are caught before any GPU time is spent. No GPU or token needed. | `scripts/audio_quality_report.py` |
-| **1 · Preprocess** | Resample to 16 kHz mono (soxr), Silero VAD finds speech, speech is cut into chunks of ≤ 15 s with 2 s overlap. | `preprocessor.py` |
-| **2a · Witness 1: sound** | **titu** FastConformer-CTC transcribes each chunk *acoustically*: faithful to how names, numbers and dialect words sounded; emits word timestamps. | `engines/titu_engine.py` |
+| **1 · Preprocess** | Resample to 16 kHz mono (soxr), Silero VAD finds speech, speech is cut **at silences** into pieces of ≤ 15 s (no overlap, no word is cut in half). Piece length and pause cuts can be set per language ([How the audio is cut](#how-the-audio-is-cut)). | `preprocessor.py` |
+| **2a · Witness 1: sound** | **titu** FastConformer-CTC transcribes each chunk *acoustically*: faithful to how names, numbers and dialect words sounded; emits word timestamps. | `engines/ctc_engine.py`, `languages/ben.yaml` |
 | **2b · Witness 2: structure** | **Regional Whisper-medium** transcribes the same chunk *fluently*, returning **3 readings (N-best)** via seeded sampling so the judge sees where it is unsure (*ward* vs *world*). | `fusion.py` |
 | **3 · Reconcile** | **Gemma-3-12B** (4-bit, local, temperature 0) reads both witnesses and, in **one call** per segment: reconciles them into one Bengali line, translates it to English, and labels each turn **ENUMERATOR / RESPONDENT** *from what is said*. A segment holding a question *and* its answer is split into two turns. Its reasoning is kept for audit. | `fusion.py`, `config/prompts/bn_survey.yaml` |
 | **4 · Guard** | Plain rules, no AI: a number **neither witness heard** → `[unclear]`; text in a **foreign script** (Cyrillic, Devanagari…) → blanked; output that **drifts from both witnesses** → flagged. | `ger_guard.py` |
@@ -164,8 +172,9 @@ just setup
 
 - `uv sync --frozen` installs the **exact** package versions in `uv.lock`
   (including the CUDA builds of torch and llama-cpp-python).
-- `scripts/download_models.py` downloads titu, regional Whisper and Gemma at
-  the **pinned commits** in `fusion_production.yaml` (~10 GB, one time) and
+- `scripts/download_models.py` downloads the Bengali witnesses (titu,
+  regional Whisper) and the Gemma judge at the **pinned commits** in
+  `languages/ben.yaml` and `fusion_production.yaml` (~10 GB, one time), and
   builds the faster CTranslate2 copy of Whisper in `models/`.
 
 **4. Verify:**
@@ -189,12 +198,18 @@ cp .env.example .env    # then set HF_TOKEN=hf_...
 # Step 0 · audio quality report for a folder (no GPU) → quality_report.xlsx
 just quality ./interviews
 
-# Steps 1-4 · one interview
-just fusion interview.m4a -o ./outputs
+# Steps 1-4 · one interview (language defaults to ben = Bengali)
+just fusion interview.m4a
+
+# …with options: give the language first, then the options
+just fusion interview.m4a ben -o ./outputs
 
 # …a whole Survey Solutions export (resume-safe: re-run to continue)
-just fusion-folder ./interviews -o ./outputs
+just fusion-folder ./interviews ben -o ./outputs
 ```
+
+The second argument is the language profile (`languages/<code>.yaml`); see
+[Adding a language](#adding-a-language).
 
 `just fusion-folder` expects the Survey Solutions layout, and merges each
 interview's files into one transcript with absolute timestamps:
@@ -234,8 +249,9 @@ Everything that affects the output is pinned:
 | Prompts | `config/prompts/bn_survey.yaml`; a unit test keeps it identical to the in-code copy |
 | Line endings | `.gitattributes` forces LF |
 
-Model revisions are full commit hashes in `fusion_production.yaml`
-(`titu.revision`, `fusion.whisper_revision`, `fusion.gguf_revision`). After
+Model revisions are full commit hashes: the witnesses in the language profile
+(`languages/ben.yaml`: `witness_ctc.revision`, `witness_whisper.revision`),
+the judge in `fusion_production.yaml` (`fusion.gguf_revision`). After
 `just setup-models`, runs are fully offline: the `fusion` recipes set
 `HF_HUB_OFFLINE=1`. Re-running the same audio with the same config gives the
 same transcript on the same hardware. GPU kernels can differ slightly across
@@ -282,16 +298,22 @@ and run `uv lock`), run `just test`, and commit both `pyproject.toml` and
 
 ## Configuration
 
-The Bengali pipeline is defined by [`fusion_production.yaml`](fusion_production.yaml),
-layered on the bundled defaults in
-[`src/asr_pipeline/default.yaml`](src/asr_pipeline/default.yaml). The settings
-that matter most:
+Configuration is split in two:
+
+- **What is shared** (VAD, the Gemma judge, decoding, guard thresholds):
+  [`fusion_production.yaml`](fusion_production.yaml), layered on the bundled
+  defaults in [`src/asr_pipeline/default.yaml`](src/asr_pipeline/default.yaml).
+- **What is language-specific** (the two witness models, the judge prompt,
+  the allowed scripts, the "unclear" marker): one profile per language in
+  [`languages/`](languages/), selected with `-l` (Bengali:
+  [`languages/ben.yaml`](languages/ben.yaml)).
+
+The shared settings that matter most:
 
 | Setting | Value | Why |
 |---|---|---|
-| `pipeline.force_engine` | `titu` | Witness 1 for Bengali |
 | `diarization.enabled` | `false` | Roles come from the LLM, not voice clustering |
-| `alignment.enabled` | `false` | titu's own CTC word timestamps are used directly |
+| `alignment.enabled` | `false` | The CTC witness's own word timestamps are used directly |
 | `fusion.whisper_nbest` | `3` | Three Whisper readings for the judge |
 | `fusion.temperature` | `0.0` | Greedy: on near-empty segments sampling invented survey answers |
 | `fusion.repeat_penalty` | `1.0` | The llama.cpp default 1.1 drops legitimate repetition in dialect speech |
@@ -299,21 +321,210 @@ that matter most:
 | `fusion.ger_guard` | `true` | Number-abstain, foreign-script and agreement checks |
 | `fusion.ger_snap` | `false` | Snap-to-witness stays off until calibrated (`just calibrate-ger name.reasoning.txt`) |
 
+### How the audio is cut
+
+Both witnesses and the judge work on the same pieces of audio, so how the
+audio is cut matters:
+
+1. **Silero VAD** marks where speech is (`preprocessing.vad`: threshold 0.5,
+   speech ≥ 250 ms, silences ≥ 350 ms kept as gaps).
+2. **Greedy merge** (as in WhisperX): consecutive speech regions are joined
+   into one piece until adding the next would pass `max_duration_s`. A piece
+   only ever ends **at a silence**, so no word is cut in half and pieces do
+   not overlap. A single region longer than the limit is kept whole.
+3. *(optional)* **Pause cut:** with `split_on_pause_s` set, a piece is also
+   closed at any pause at least that long. Speaker changes usually come with
+   a pause, so pieces then mostly hold one speaker.
+
+The right values depend on the **language and its models**, so a profile can
+override them with a `chunking:` block (see
+[`languages/_template.yaml`](languages/_template.yaml)):
+
+| Setting | Shared default | Depends on |
+|---|---|---|
+| `max_duration_s` | `15` | What both witnesses handle well: Whisper sees 30 s at most; CTC fine-tunes are mostly trained on clips under ~20 s and degrade on longer ones. Longer pieces give the judge more context but mix more speakers. |
+| `split_on_pause_s` | off | Turn-taking rhythm of the language and survey style (0.4–0.8 s typical). Shorter pieces mean more judge calls (slower). |
+
+Bengali and Nepali both use the shared defaults. On 15 minutes of a Nepali
+interview, a 0.5 s pause cut changed neither transcript accuracy (CER 22.4% →
+22.1%) nor role accuracy (86.5% → 86.6% of words), so it stays off. (The
+fixed-window fallback with 2 s overlap is only used when VAD is disabled.)
+
 **Prompt.** The judge's instructions (dialect glossary, domain priors, number
-rules, role definitions) live in
+rules, role definitions) live in the file the profile names; for Bengali
 [`config/prompts/bn_survey.yaml`](config/prompts/bn_survey.yaml). Edit the
-YAML, not the code. Keep the in-code copy in `fusion.py` in sync; `just test`
-fails if they drift.
+YAML, not the code. The Bengali prompt also has an in-code copy in
+`fusion.py`; `just test` fails if they drift.
 
-**Adapting to another language or survey:** copy `fusion_production.yaml`,
-swap the two witnesses for a phonetic (CTC) and a fluent (Whisper-style) model
-for your language, and adapt the prompt's glossary and priors. Keep the
-number-abstain guard. Validate on 20–30 segments with a native speaker before
-scaling.
+## Adding a language
 
-## Other languages (general path)
+The two-witness design works for any language that has both a CTC model (the
+"sound" witness) and a Whisper fine-tune (the "structure" witness). Gemma is
+multilingual and is shared. Everything language-specific is one profile file:
 
-For languages other than Bengali, the pipeline uses a single ASR engine
+| Profile field | What it sets | Bengali |
+|---|---|---|
+| `witness_ctc` | Witness 1: `backend` (`nemo` for a `.nemo` repo, `hf` for a wav2vec2 / XLS-R / MMS CTC model), `model`, `revision`, `target_lang` (MMS adapters) | `nemo`, `hishab/titu_stt_bn_fastconformer` |
+| `witness_whisper` | Witness 2: `model`, `revision`, Whisper `language` code, `ct2_path` | `bengaliAI/tugstugi_…_whisper-medium`, `bn` |
+| `prompt_file` | Judge prompt: glossary, survey priors, number words, roles | `config/prompts/bn_survey.yaml` |
+| `tag` | Line tag in the judge reply and transcript (`[bn]`, `[ne]` …) | `bn` |
+| `scripts` | Unicode scripts allowed in the output; anything else is blanked | `[BENGALI, LATIN]` |
+| `unclear_marker` | Written for unintelligible spans and fabricated numbers | `[অস্পষ্ট]` |
+| `chunking` *(optional)* | Piece length and pause cuts for this language ([How the audio is cut](#how-the-audio-is-cut)) | shared defaults |
+
+Digits need no setting: the number guard compares digits of any script by
+value (৬০ = ६० = 60).
+
+Witness models may also need these per-model settings: `decoder: ctc` for
+hybrid NeMo checkpoints (CTC + RNN-T heads; the witness must use the CTC
+head), `language_head` for AI4Bharat multi-language IndicConformer checkpoints
+(e.g. `ne`; loaded in stock NeMo through NVIDIA's compatibility patches in
+`engines/indic_multisoftmax.py`), `ct2_subfolder` when the repo already ships a CTranslate2 copy, and
+`prefix_tokens` for Whisper fine-tunes with mode tokens (e.g. Sagarmatha's
+`<|mixed|>`, `<|verbatim|>`).
+
+### Choosing models for a new language
+
+**The rule that matters:** the judge can only fix a word if at least one
+witness heard it right. So the best pair is not the two most accurate
+models; it is two *good* models whose mistakes fall on **different words**.
+That needs different architectures (CTC vs Whisper) and, above all,
+**different training data**. A pair fine-tuned on the same dataset makes the
+same mistakes, and no judge can recover them.
+
+**1. Find candidates (both fine-tuned on the language).**
+
+- Search the Hub:
+  `https://huggingface.co/api/models?search=<language>&pipeline_tag=automatic-speech-recognition&sort=downloads&direction=-1&limit=100`,
+  plus the language code. Check the big regional families too: AI4Bharat
+  (IndicConformer), ARTPARK (SraVaani), Meta (MMS), national universities
+  and labs.
+- Look for an **independent benchmark** that ran many models on the same
+  data. For Nepali, [harrrshall/kriti](https://huggingface.co/harrrshall/kriti)
+  publishes 19 open systems on 3,630 utterances. Read its caveats (development
+  set, mostly one data source).
+- For each candidate, record from the model card: **training datasets and
+  hours**, base model, architecture and decoder, reported WER **and on which
+  test set**, license (CC BY-NC = non-commercial), gated or not, last update.
+- Watch for one dataset hiding in every model (Nepali: OpenSLR 54), and for
+  models trained on the test set you plan to use (some include FLEURS).
+
+**2. Measure the pairs** on the same reference clips:
+
+```bash
+uv run --frozen python scripts/fetch_fleurs.py ne_np ~/fleurs_ne -n 100   # any FLEURS language
+# write candidate profiles in languages/candidates/, then for each:
+uv run --frozen python scripts/download_models.py -p languages/candidates/<pair>.yaml --witnesses-only
+uv run --frozen python scripts/witness_complementarity.py -p languages/candidates/<pair>.yaml ~/fleurs_ne ~/compl
+```
+
+The report gives each witness's WER, the **oracle** (better witness per
+clip), the **shared-error rate** (words both got wrong, as a share of words
+either got wrong) and the **rescuable** share (one witness's errors the other
+got right). Transcripts are cached per model, so pairs can be re-mixed for
+free. Measured on 100 FLEURS clips (read speech) in this repo:
+
+| Pair | W1 WER | W2 WER | Oracle | Shared errors | W1 errors W2 fixes | W2 errors W1 fixes |
+|---|---|---|---|---|---|---|
+| **Bengali** titu + regional Whisper (validated) | 35.6% | 31.6% | 26.0% | **38%** | 41% | 52% |
+| Nepali: AI Lab IndicConformer + AI Lab Whisper (same data) | 40.5% | 43.3% | 37.2% | 63% | 25% | 25% |
+| Nepali: Blackfire XLS-R + AI Lab Whisper | 38.1% | 43.3% | 34.6% | 57% | 29% | 31% |
+| Nepali: Blackfire XLS-R + Sagarmatha V6 | 38.1% | 25.4% | 24.1% | 56% | 44% | 11% |
+| **Nepali: AI4Bharat IndicConformer (CTC) + Sagarmatha V6** (current) | 27.9% | 25.4% | 21.9% | 63% | 33% | 15% |
+
+The shared-error rate is a ratio, so it can hide that a pair simply makes
+fewer errors. Also compare the **floor**: the share of reference words
+**neither** witness got right (no judge can recover them). Bengali pair:
+13.5%; Nepali AI4Bharat + Sagarmatha: 17.7% (the lowest of the Nepali pairs);
+Nepali AI Lab pair: 26%.
+
+What to aim for, using the validated Bengali pair as the yardstick:
+- **Shared errors around 40% or lower.** At 60%, Gemma's reconciliation on
+  Nepali gained only ~2 points of WER over the best single witness.
+- **Rescue in both directions** (each witness fixes a large share of the
+  other's errors). A strong witness paired with a weak one (Blackfire +
+  Sagarmatha: 44% vs 11%) is little better than the strong one alone.
+- The oracle clearly below the better witness.
+
+**3. Choose the judge LLM.** No current open LLM publishes a translation
+score for most low-resource languages, so check, in order:
+1. Is the language listed in the model card or technical report?
+2. Per-language scores: FLORES-200 xx→en (chrF++), then MMLU-ProX /
+   Global-MMLU / INCLUDE, then Belebele. Note that multilingual averages
+   (MMMLU, WMT24++) often leave the language out.
+3. Fit: a Q4 GGUF from the official repo, Unsloth or bartowski, with ~2 GB
+   VRAM spare for the KV cache. License: Apache-2.0 / MIT / Gemma.
+4. A dedicated translation model on clean text as an upper bound. For Nepali
+   → English on FLORES-200, chrF++ is 68.1 for IndicTrans2 and 66.9 for
+   NLLB-54B (IndicTrans2 paper).
+
+Then run 50–100 FLEURS clips through the full fusion step with 2–3 candidate
+judges and compare English chrF against the FLEURS English references, the
+reconciled line's CER against the reference and each witness, the share of
+replies that break the output format, and any numbers not present in either
+witness.
+
+Candidate judges (all Apache-2.0, not gated; none has a published Nepali
+translation score, and they are **not yet tested** with this repo's
+llama.cpp version):
+
+| GPU | Candidate | Note |
+|---|---|---|
+| 8 GB | `google/gemma-3-12b-it` (current) | Nepali FLEURS: English chrF ≈ 48–49 (this repo, 100 clips) |
+| 8 GB | `google/gemma-4-12B-it` (official `-qat-q4_0-gguf`) | Newer generation; much higher multilingual averages |
+| 8 GB | `Qwen/Qwen3.5-9B` (Unsloth GGUF, thinking off) | Qwen scores above Gemma 3 on Nepali MMLU-ProX at equal size |
+| 16 GB | `Qwen/Qwen3.5-27B` (IQ4_XS) or `google/gemma-4-31B-it` | Best quality that fits 16 GB |
+
+**4. Write the profile and prompt.** Copy `languages/_template.yaml` and
+`config/prompts/bn_survey.yaml`. In the prompt, keep the structure, the role
+rules, the number rules and the output format; replace the dialect glossary,
+survey priors and number words; use the profile's `[tag]` and unclear marker.
+Pin every model to a full commit hash.
+
+**5. Validate end to end.** Run the full pipeline on 50–100 FLEURS clips, then
+on 20–30 real interview segments checked by a native speaker. FLEURS is read
+speech; field recordings (8 kHz phone audio, conversation, code-switching)
+behave differently.
+
+**Pitfalls met while adding Nepali** (all handled in the code now):
+- Score with tokens split on punctuation by Unicode category: the regex
+  `[^\w\s]` splits Devanagari/Bengali words at their vowel signs.
+- Fine-tunes that **add tokens** to Whisper's vocabulary lose them with
+  faster-whisper's own `decode` (Sagarmatha went from 25% to 93% WER).
+- Hybrid NeMo models default to the RNN-T head; the witness needs `decoder: ctc`.
+- Some judges drop the `[tag]` / `[en]` labels; count format failures
+  separately from accuracy.
+
+**Nepali status:** [`languages/nep.yaml`](languages/nep.yaml) uses the best
+measured pair: **AI4Bharat IndicConformer** (CTC head, `language_head: ne`;
+gated: accept its terms on Hugging Face first) + **Sagarmatha V6** (verbatim
+mode). The other measured pairs are kept in
+[`languages/candidates/`](languages/candidates/).
+
+Tested on a real Nepali survey interview (70 min, phone quality, two
+speakers), against the human transcript (8,916 words), with fillers and
+spelling variants normalised:
+
+| | WER | CER |
+|---|---|---|
+| CTC witness alone | 49.7% | 27.7% |
+| **Fused output** | **43.1%** | **25.7%** |
+| Fused output, first 15 min only | 38.0% | 22.4% |
+
+Most remaining differences are style (fillers kept by Sagarmatha's verbatim
+mode, removed by the human transcriber), spelling variants and names. The
+full run took 3.5 h on a 6 GB laptop GPU (Gemma partly on CPU) and flagged
+76 of 369 segments for review. **Roles are the weak point on Nepali**: right
+for 86% of words in the first 15 min but 67% over the whole interview, where
+the judge labels most interviewer lines RESPONDENT. Treat Nepali role labels
+as a draft. The prompt
+([`config/prompts/ne_survey.yaml`](config/prompts/ne_survey.yaml)) still needs
+a native-speaker review, and its domain priors (household, climate) should be
+adapted to each survey.
+
+## Other languages without a profile (general path)
+
+For languages without a profile in `languages/`, the pipeline uses a single ASR engine
 (Whisper large-v3 for high-resource languages, Omnilingual ASR for 1,600+
 others), pyannote diarization, and a local LLM for correction/translation.
 This path does not have the two-witness fusion or the review worklist.
@@ -331,13 +542,16 @@ uv run --frozen --extra multilingual asr-pipeline list-languages
 ## Repository layout
 
 ```
-fusion_production.yaml     Bengali production config (pinned models)
+fusion_production.yaml     Shared production config (judge, VAD, decoding, guards)
+languages/                 One profile per language: witnesses, prompt, scripts
+  candidates/              Witness pairs being measured (not selectable with -l)
 config/prompts/            Judge prompt (editable YAML)
 src/asr_pipeline/
   cli.py                   `asr-pipeline` command line
   pipeline.py              Orchestration (Steps 1-4, outputs, worklist)
   preprocessor.py          Resampling, VAD, chunking
-  engines/                 titu, Whisper, Omnilingual
+  profiles.py              Language profile schema + loader
+  engines/                 CTC witness (NeMo / HF), Whisper, Omnilingual
   fusion.py                Whisper witness, Gemma judge, role-labelled turns
   ger_guard.py             Deterministic guards
   postprocessor.py         GGUF loader; general-path translation backends
@@ -347,6 +561,8 @@ scripts/
   audio_quality_report.py  Step 0
   download_models.py       Pinned model download + CT2 conversion
   ger_calibrate.py         GER snap-threshold calibration
+  fetch_fleurs.py          FLEURS test set for any language (+ English refs)
+  witness_complementarity.py  How complementary two witnesses are
 tests/                     Unit tests (no GPU, no models)
 docs/presentation/         The presentation this code implements
 ```
