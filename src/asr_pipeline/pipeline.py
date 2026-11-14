@@ -26,9 +26,7 @@ from asr_pipeline.alignment import align_segments, merge_consecutive_segments
 from asr_pipeline.config import VALID_ASR_ENGINES, AppConfig
 from asr_pipeline.diarization import SpeakerDiarizer, create_diarizer
 from asr_pipeline.engines.omnilingual_engine import OmnilingualEngine
-from asr_pipeline.engines.qwen_engine import QwenEngine
-from asr_pipeline.engines.titu_engine import TituEngine
-from asr_pipeline.engines.indic_conformer_engine import IndicConformerEngine
+from asr_pipeline.engines.ctc_engine import CTCEngine
 from asr_pipeline.engines.whisper_engine import WhisperEngine
 from asr_pipeline.forced_aligner import ForcedAligner
 from asr_pipeline.formatter import write_transcript
@@ -47,6 +45,7 @@ from asr_pipeline.models import (
     ASRSegment,
     AudioChunk,
     AudioQualityMetrics,
+    DiarizationResult,
     LanguageTier,
     NonSpeechSegment,
     ProcessedSegment,
@@ -56,6 +55,7 @@ from asr_pipeline.models import (
 )
 from asr_pipeline.postprocessor import PostProcessor
 from asr_pipeline.fusion import FusionTranslator
+from asr_pipeline.profiles import LanguageProfile, load_profile
 from asr_pipeline.preprocessor import AudioPreprocessor
 
 logger = logging.getLogger("asr_pipeline")
@@ -108,12 +108,34 @@ class ASRPipeline:
         self._preprocessor: Optional[AudioPreprocessor] = None
         self._whisper: Optional[WhisperEngine] = None
         self._omnilingual: Optional[OmnilingualEngine] = None
-        self._qwen: Optional[QwenEngine] = None
-        self._titu: Optional[TituEngine] = None
-        self._indic_conformer: Optional[IndicConformerEngine] = None
+        self._ctc: Optional[CTCEngine] = None
+        self._profile: Optional[LanguageProfile] = None
         self._diarizer: Optional[SpeakerDiarizer] = None
         self._aligner: Optional[ForcedAligner] = None
         self._postprocessor: Optional[PostProcessor] = None
+
+    def _profile_for(self, language: str) -> LanguageProfile:
+        """The fusion language profile (languages/<code>.yaml), cached. A
+        new language drops the loaded CTC witness so it is rebuilt."""
+        if self._profile is None or self._profile.code != language:
+            self._profile = load_profile(language)
+            if self._ctc is not None:
+                self._ctc.unload()
+                self._ctc = None
+        return self._profile
+
+    def _apply_profile_chunking(self, profile: LanguageProfile) -> None:
+        """Per-language chunking (profile.chunking) overrides the shared
+        preprocessing.chunking for this run."""
+        if profile.chunking is None:
+            return
+        chunking = self._config.preprocessing.chunking
+        for key, value in profile.chunking.model_dump().items():
+            if value is not None:
+                setattr(chunking, key, value)
+        logger.info(f"  chunking ({profile.code} profile): "
+                    f"max {chunking.max_duration_s}s, cut at pauses ≥ "
+                    f"{chunking.split_on_pause_s}s")
 
     # ─────────────────────────────────────────────────────────────────
     # Public API
@@ -155,6 +177,11 @@ class ASRPipeline:
         # Reproducibility: seed every RNG from the single pipeline.seed knob.
         _set_global_seeds(self._config.pipeline.seed)
 
+        # Fusion path: load + validate the language profile up front, so a
+        # missing/invalid languages/<code>.yaml fails before any GPU work.
+        if self._config.postprocessing.translation_backend == "fusion":
+            self._apply_profile_chunking(self._profile_for(language))
+
         # Override speaker counts if provided
         if min_speakers is not None:
             self._config.diarization.min_speakers = min_speakers
@@ -193,7 +220,7 @@ class ASRPipeline:
                 )
 
                 # ── Stage 3b: Forced Alignment ─────────────────
-                with stage_log("3b", "Word Timestamps", "titu native CTC word timestamps (forced alignment skipped)"):
+                with stage_log("3b", "Word Timestamps", "native CTC word timestamps (forced alignment skipped)"):
                     asr_segments = self._run_forced_alignment(
                         asr_segments, wav_path, language
                     )
@@ -204,24 +231,24 @@ class ASRPipeline:
                     asr_segments = self._dedup_overlap_words(asr_segments)
 
                 # ── Stage 5: Alignment ───────────────────────────
-                # Word-level speaker attribution → speaker-pure segments
-                # (still labelled by diarization cluster SPEAKER_xx). The
-                # cluster→role decision (ENUMERATOR / RESPONDENT) is made
-                # once inside the fusion stage by an LLM classifier, where
-                # Gemma is already loaded — so the raw transcript shows the
-                # honest pre-LLM clusters.
-                with stage_log("5", "Alignment", "Word-level speaker attribution"):
+                # With diarization: word-level speaker attribution →
+                # speaker-pure segments (SPEAKER_xx). Without it (Bengali
+                # fusion): one segment per VAD chunk, NOT merged — the fusion
+                # LLM labels each turn ENUMERATOR / RESPONDENT, so the raw
+                # transcript carries no speaker labels yet.
+                with stage_log("5", "Alignment", "Segments for post-processing"):
                     aligned = align_segments(asr_segments, diarization_result)
-                    aligned = merge_consecutive_segments(aligned)
+                    if self._config.diarization.enabled:
+                        aligned = merge_consecutive_segments(aligned)
 
                 # ── Stage 5b: Raw transcript snapshot ──────────
-                # Save a transcript built ONLY from titu + diarization
+                # Save a transcript built ONLY from the ASR engine (+ diarization)
                 # (no LLM correction, no translation). Lets the reviewer
                 # compare raw ASR vs. LLM-cleaned output side by side,
                 # and gives a usable deliverable even if stage 6 fails
                 # or is killed.
                 with stage_log("5b", "Raw Output",
-                               "Writing raw titu+diarization transcript"):
+                               "Writing raw (pre-LLM) transcript"):
                     raw_processed = [
                         ProcessedSegment(
                             segment_id=s.segment_id,
@@ -265,9 +292,14 @@ class ASRPipeline:
 
                 # ── Stage 7: Output ──────────────────────────────
                 with stage_log("7", "Output", "Formatting and writing transcript"):
+                    num_speakers = (
+                        diarization_result.num_speakers
+                        if self._config.diarization.enabled
+                        else len({s.speaker_id for s in processed})
+                    )
                     result = self._build_result(
                         audio_path, language, engine_name, processed,
-                        diarization_result.num_speakers, project_name,
+                        num_speakers, project_name,
                         non_speech_regions,
                     )
                     written_files: list[Path] = []
@@ -442,8 +474,22 @@ class ASRPipeline:
 
         parallel_start = time.perf_counter()
 
-        if True:  # phoneme_first engine removed \u2014 standard path only
-            # \u2500\u2500 Standard: transcription + diarization in parallel \u2500\u2500
+        if not self._config.diarization.enabled:
+            # Bengali fusion path: no voice clustering — the fusion LLM
+            # labels ENUMERATOR / RESPONDENT from what is said.
+            console.rule("[stage]Stage 3: Transcription[/stage]", style="cyan")
+            logger.info("  Diarization disabled — roles are labelled by "
+                        "the fusion LLM")
+            asr_segments = self._run_transcription(
+                chunks, language, engine_name, omni_lang, wav_path)
+            logger.info(
+                f"[success]\u2713 Stage 3 completed[/success] "
+                f"in {time.perf_counter() - parallel_start:.1f}s"
+            )
+            return asr_segments, DiarizationResult(num_speakers=0, segments=[])
+
+        if True:  # phoneme_first engine removed — standard path only
+            # ── Standard: transcription + diarization in parallel ──
             console.rule(
                 "[stage]Stages 3 & 4: Transcription + Diarization (parallel)[/stage]",
                 style="cyan",
@@ -534,90 +580,41 @@ class ASRPipeline:
                         all_segments.extend(segments)
                         progress.advance(task)
 
-        elif engine_name == "qwen":
-            # ── Qwen3-ASR engine (default for non-high-resource) ──
-            # VAD chunking supplies segment boundaries; this engine
-            # only produces text per chunk.
-            if self._qwen is None or not self._qwen.is_loaded:
-                self._qwen = QwenEngine(
-                    self._config.qwen,
+        elif engine_name == "ctc":
+            # ── CTC witness from the language profile (e.g. titu) ──
+            # Batched inference is significantly faster than per-chunk.
+            w = self._profile_for(language).witness_ctc
+            if self._ctc is None or not self._ctc.is_loaded:
+                self._ctc = CTCEngine(
+                    model_id=w.model,
+                    language=language,
+                    backend=w.backend,
+                    revision=w.revision,
+                    nemo_file=w.nemo_file,
+                    decoder=w.decoder,
+                    language_head=w.language_head,
+                    target_lang=w.target_lang,
                     device=self._config.pipeline.device,
+                    batch_size=w.batch_size,
                 )
-                self._qwen.load()
+                self._ctc.load()
 
             logger.info(
                 f"  Transcribing {len(chunks)} chunks with "
-                f"{self._qwen.name}"
+                f"{self._ctc.name}"
             )
             progress = create_progress("Transcription")
             with progress:
                 task = progress.add_task(
-                    "Qwen3-ASR", total=len(chunks),
+                    "CTC witness", total=len(chunks),
                 )
-                for chunk in chunks:
-                    segments = self._qwen.transcribe_chunk(chunk, language)
-                    all_segments.extend(segments)
-                    progress.advance(task)
-
-        elif engine_name == "titu":
-            # ── titu Bengali FastConformer-CTC engine ──
-            # NeMo model. Batched inference is significantly faster
-            # than per-chunk; we use transcribe_batch.
-            if self._titu is None or not self._titu.is_loaded:
-                self._titu = TituEngine(
-                    device=self._config.pipeline.device,
-                    batch_size=self._config.titu.batch_size,
-                    model_id=self._config.titu.model_id,
-                )
-                self._titu.load()
-
-            logger.info(
-                f"  Transcribing {len(chunks)} chunks with "
-                f"{self._titu.name}"
-            )
-            progress = create_progress("Transcription")
-            with progress:
-                task = progress.add_task(
-                    "titu (FastConformer-CTC)", total=len(chunks),
-                )
-                # Batched: NeMo's model.transcribe handles batching
-                # internally. Update progress proportionally.
-                batch_size = self._config.titu.batch_size
+                batch_size = w.batch_size
                 for i in range(0, len(chunks), batch_size):
                     batch = chunks[i:i + batch_size]
-                    segs = self._titu.transcribe_batch(batch, language)
+                    segs = self._ctc.transcribe_batch(batch, language)
                     all_segments.extend(segs)
                     for _ in batch:
                         progress.advance(task)
-
-        elif engine_name == "indic_conformer":
-            # ── AI4Bharat IndicConformer-600M (open, local) ──
-            # Loads via transformers trust_remote_code; per-utterance
-            # call interface, so we loop chunks. decoder configurable
-            # via pipeline.indic_conformer_decoder (ctc|rnnt).
-            decoder = getattr(
-                self._config.pipeline, "indic_conformer_decoder", "rnnt")
-            if self._indic_conformer is None or not self._indic_conformer.is_loaded:
-                self._indic_conformer = IndicConformerEngine(
-                    device=self._config.pipeline.device,
-                    decoder=decoder,
-                )
-                self._indic_conformer.load()
-
-            logger.info(
-                f"  Transcribing {len(chunks)} chunks with "
-                f"{self._indic_conformer.name}"
-            )
-            progress = create_progress("Transcription")
-            with progress:
-                task = progress.add_task(
-                    self._indic_conformer.name, total=len(chunks),
-                )
-                for chunk in chunks:
-                    segs = self._indic_conformer.transcribe_chunk(
-                        chunk, language)
-                    all_segments.extend(segs)
-                    progress.advance(task)
 
         else:  # omnilingual
             if self._omnilingual is None:
@@ -730,13 +727,13 @@ class ASRPipeline:
             logger.info("  Forced alignment disabled in config, skipping")
             return segments
 
-        # titu (CTC) now emits native word timestamps; when present they are
+        # The CTC witness emits native word timestamps; when present they are
         # consistent with the text, so the MMS_FA pass is redundant AND would
         # CORRUPT them (MMS_FA is a no-op on Bengali — it strips non-Latin —
         # and would only partially align code-switched Latin words). Skip it.
         if any(s.words for s in segments):
             n = sum(1 for s in segments if s.words)
-            logger.info("  Word timestamps already present (titu CTC) on "
+            logger.info("  Word timestamps already present (CTC witness) on "
                         "%d/%d segments — skipping MMS_FA", n, len(segments))
             return segments
 
@@ -756,17 +753,21 @@ class ASRPipeline:
         # ── Validated two-witness fusion + NMT backend ──────────────
         if self._config.postprocessing.translation_backend == "fusion":
             fc = self._config.postprocessing.fusion
+            profile = self._profile
             logger.info(
-                "  Fusion stage: titu ‖ Whisper → Gemma-3 fusion + "
-                "translation (one model, fully local, open)")
-            logger.info(f"    2nd witness        : {fc.whisper_model}")
+                "  Fusion stage: CTC ‖ Whisper → Gemma-3 fusion + "
+                "translation + roles (one model, fully local, open)")
+            logger.info(f"    language profile   : {profile.code} "
+                        f"({profile.name})")
+            logger.info(f"    2nd witness        : "
+                        f"{profile.witness_whisper.model}")
             logger.info(f"    fusion+translation : {fc.gguf_file}")
             translator = FusionTranslator(
+                profile=profile,
                 device=self._config.pipeline.device,
-                whisper_model=fc.whisper_model,
-                whisper_ct2_path=fc.whisper_ct2_path,
                 gguf_repo=fc.gguf_repo,
                 gguf_file=fc.gguf_file,
+                gguf_revision=fc.gguf_revision,
                 gguf_n_gpu_layers=fc.gguf_n_gpu_layers,
                 prompt_lookup_tokens=fc.prompt_lookup_tokens,
                 whisper_batch_size=fc.whisper_batch_size,
@@ -785,10 +786,10 @@ class ASRPipeline:
                 ger_guard=fc.ger_guard,
                 ger_snap=fc.ger_snap,
                 ger_snap_tau=fc.ger_snap_tau,
-                prompts_file=fc.prompts_file,
                 fusion_backend=fc.fusion_backend,
                 n_parallel=fc.n_parallel,
                 server_port=fc.server_port,
+                constrain_format=fc.constrain_format,
             )
             return translator.process(aligned, wav_path)
 
@@ -873,15 +874,9 @@ class ASRPipeline:
         engines_used = []
         if engine_name == "whisper":
             engines_used.append(f"Whisper {self._config.whisper.model_size}")
-        elif engine_name == "qwen":
-            engines_used.append(f"Qwen3-ASR ({self._config.qwen.model})")
-        elif engine_name == "titu":
-            engines_used.append("titu (FastConformer-CTC Bengali)")
-        elif engine_name == "indic_conformer":
-            dec = getattr(
-                self._config.pipeline, "indic_conformer_decoder", "rnnt")
+        elif engine_name == "ctc":
             engines_used.append(
-                f"IndicConformer-600M ({dec.upper()}, AI4Bharat)")
+                f"{self._profile_for(language).witness_ctc.model} (CTC)")
         else:
             engines_used.append(f"Omnilingual {self._config.omnilingual.model_card}")
 
@@ -892,7 +887,7 @@ class ASRPipeline:
             fc = self._config.postprocessing.fusion
             pp_stages.append(
                 f"Two-witness fusion + translation "
-                f"(titu ‖ Whisper → {fc.gguf_file})")
+                f"(CTC ‖ Whisper → {fc.gguf_file})")
         elif backend == "translategemma":
             pp_stages.append("TranslateGemma Translation")
         elif backend == "qwen":
@@ -1004,7 +999,7 @@ class ASRPipeline:
             "Reasons: number=verify the figure | witness-disagree=ASR "
             "engines diverged | unclear=fusion couldn't recover | "
             "empty-output=no translation | fusion-fallback=LLM gave no "
-            "Bengali, FLUENT raw substituted | fusion-truncated=hit the "
+            "native text, FLUENT raw substituted | fusion-truncated=hit the "
             "token cap (the hard/long segments)",
             "=" * 70,
             "",
@@ -1024,7 +1019,7 @@ class ASRPipeline:
     def _write_reasoning_file(self, segments, output_dir, stem) -> None:
         """Write the fusion <think> reasoning per segment — the audit
         trail for the witness-reconciliation claim. Marks fallback
-        segments (LLM produced no Bengali → FLUENT raw substituted) so the
+        segments (LLM produced no native text → FLUENT raw substituted) so the
         coverage hole is inspectable, not hidden in the transcript."""
         path = Path(output_dir) / f"{stem}.reasoning.txt"
 
@@ -1050,7 +1045,7 @@ class ASRPipeline:
             lit = (getattr(s, "witness_literal", "") or "").strip()
             flu = (getattr(s, "witness_fluent", "") or "").strip()
             if lit or flu:
-                lines.append(f"  LITERAL (titu)   : {lit}")
+                lines.append(f"  LITERAL (CTC)    : {lit}")
                 lines.append(f"  FLUENT (whisper) : {flu}")
             lines.append(f"  think: {think or '(model skipped <think>)'}")
             lines.append(f"  bn   : {s.corrected_text}")
@@ -1081,12 +1076,12 @@ class ASRPipeline:
         if self._whisper is not None:
             self._whisper.unload()
             self._whisper = None
-        if self._titu is not None:
-            # titu (NeMo FastConformer) is the primary engine on this
-            # path and holds a large CUDA workspace. Not freeing it left
-            # the 8GB card full → the fusion Whisper OOM'd even one clip.
-            self._titu.unload()
-            self._titu = None
+        if self._ctc is not None:
+            # The CTC witness (e.g. titu, NeMo) holds a large CUDA
+            # workspace. Not freeing it left the 8GB card full → the
+            # fusion Whisper OOM'd even one clip.
+            self._ctc.unload()
+            self._ctc = None
         if self._omnilingual is not None:
             # Offload to CPU instead of destroying — avoids fairseq2
             # thread-local gang context corruption on reload.

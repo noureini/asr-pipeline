@@ -1,25 +1,18 @@
 """
-Segment alignment module (WhisperX-style word-level speaker attribution).
+Segment alignment: word-level speaker attribution (WhisperX-style).
 
-The old approach assigned ONE speaker per ~30 s ASR chunk by maximum
-overlap. When a chunk spans a speaker change (enumerator asks → respondent
-answers), the whole chunk got the dominant speaker's label and the other
-speaker's words were silently mis-attributed. That mixing is exactly what
-the downstream LLM "role attribution" stage was patching over.
+Used by the general multilingual path, where speaker labels come from
+voice diarization. Each word (titu / engine word timestamps) is tagged with
+the diarization turn it overlaps, and a chunk is split into speaker-pure
+runs at every speaker change. Segments without word timestamps fall back to
+the whole-segment maximum-overlap heuristic.
 
-With titu's native CTC word timestamps we instead tag EACH WORD with the
-diarization turn it overlaps (`assign_word_speakers`), then split the chunk
-into speaker-pure runs at every speaker-change boundary. The result is
-segments that each belong to a single speaker — no LLM band-aid needed.
-
-Segments that carry no word timestamps (e.g. a transcription fallback)
-degrade gracefully to the old whole-segment maximum-overlap heuristic.
+The Bengali fusion path does not use diarization: the fusion LLM labels
+ENUMERATOR / RESPONDENT from what is said (see fusion.py).
 """
-
 from __future__ import annotations
 
 import logging
-from collections import defaultdict
 
 from asr_pipeline.models import (
     AlignedSegment,
@@ -32,8 +25,6 @@ from asr_pipeline.models import (
 logger = logging.getLogger("asr_pipeline")
 
 _FALLBACK_SPEAKER = "SPEAKER_00"
-ENUMERATOR = "ENUMERATOR"
-RESPONDENT = "RESPONDENT"
 
 
 def compute_overlap(
@@ -213,9 +204,9 @@ def align_segments(
         return []
 
     if not diarization.segments:
-        logger.warning(
-            "No diarization segments available, "
-            "assigning all to SPEAKER_00"
+        logger.info(
+            "  No diarization segments — one segment per ASR chunk "
+            "(SPEAKER_00)"
         )
         return [
             AlignedSegment(
@@ -301,94 +292,3 @@ def merge_consecutive_segments(
         )
 
     return merged
-
-
-# Bengali question words (whole-token match) — the enumerator asks; the
-# respondent rarely does. কি/কী also appears as a copula, so it's weighted
-# with the pronoun signal rather than relied on alone.
-_BN_QUESTION_WORDS = {
-    "কি", "কী", "কেন", "কোথায়", "কিভাবে", "কীভাবে", "কত", "কতটা", "কতটুকু",
-    "কখন", "কোন", "কোনটা", "কে", "কারা", "কীসের", "কিসের",
-}
-
-
-def decide_role_map(
-    segments: list[AlignedSegment],
-    consent_keywords: list[str] | None = None,
-    anchor_window_s: float = 600.0,
-) -> dict[str, str]:
-    """HEURISTIC cluster→role decision (fallback when the LLM classifier is
-    unavailable). Returns {SPEAKER_xx: ENUMERATOR|RESPONDENT}.
-
-    Signal (Bengali-native, validated 2026-06-25): the ENUMERATOR addresses the
-    respondent formally as আপনি/আপনার/আপনাকে and ASKS questions; the RESPONDENT
-    speaks of আমি/আমরা/আমার. So the enumerator cluster is the one with the most
-    আপন- tokens + question words. (The old "most speech = enumerator" was
-    BACKWARDS — respondents usually speak more — and mislabelled in testing.)
-
-    Last resort when the signal is absent: the cluster that owns the EARLIEST
-    segment (the enumerator opens with the greeting/consent script). Single
-    cluster → all RESPONDENT. The LLM classifier is preferred; this catches
-    its failures.
-    """
-    speakers = sorted({s.speaker_id for s in segments})
-    if not speakers:
-        return {}
-    if len(speakers) == 1:
-        logger.warning(
-            "  Role mapping: only 1 speaker cluster — diarization did not "
-            "separate enumerator/respondent. Labelling all RESPONDENT."
-        )
-        return {speakers[0]: RESPONDENT}
-
-    kw = [k.lower() for k in (consent_keywords or []) if k.strip()]
-    enum_score: dict[str, int] = defaultdict(int)
-    for s in segments:
-        text = (s.raw_text or "")
-        toks = text.split()
-        # আপন- = formal "you" (enumerator addressing respondent) — strongest cue
-        enum_score[s.speaker_id] += 2 * sum(1 for t in toks if "আপন" in t)
-        enum_score[s.speaker_id] += sum(1 for t in toks if t in _BN_QUESTION_WORDS)
-        if kw:  # optional legacy consent-keyword boost
-            low = text.lower()
-            enum_score[s.speaker_id] += sum(1 for k in kw if k in low)
-
-    best = max(speakers, key=lambda sp: enum_score.get(sp, 0))
-    if enum_score.get(best, 0) > 0:
-        enum, basis = best, f"আপন-/question signal (score={enum_score[best]})"
-    else:
-        # No linguistic signal — the enumerator opens the interview.
-        first_seg = min(segments, key=lambda s: s.start_s)
-        enum, basis = first_seg.speaker_id, "earliest speaker (no signal)"
-
-    logger.info(
-        "  Roles (heuristic fallback): %s → ENUMERATOR (%s); %d → RESPONDENT",
-        enum, basis, len(speakers) - 1,
-    )
-    return {sp: (ENUMERATOR if sp == enum else RESPONDENT) for sp in speakers}
-
-
-def map_speakers_to_roles(
-    segments: list[AlignedSegment],
-    consent_keywords: list[str] | None = None,
-    anchor_window_s: float = 600.0,
-) -> list[AlignedSegment]:
-    """Apply the heuristic `decide_role_map` to segments (see that function).
-    Kept for the offline test and as a standalone heuristic entry point."""
-    if not segments:
-        return segments
-    return relabel_segments(
-        segments, decide_role_map(segments, consent_keywords, anchor_window_s))
-
-
-def relabel_segments(
-    segments: list[AlignedSegment],
-    mapping: dict[str, str],
-) -> list[AlignedSegment]:
-    """Rewrite each segment's (and its words') speaker_id via `mapping`."""
-    out: list[AlignedSegment] = []
-    for s in segments:
-        role = mapping.get(s.speaker_id, RESPONDENT)
-        words = [w.model_copy(update={"speaker_id": role}) for w in s.words]
-        out.append(s.model_copy(update={"speaker_id": role, "words": words}))
-    return out

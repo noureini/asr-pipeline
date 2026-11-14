@@ -222,22 +222,12 @@ def load_diarizer():
         return None
 
     # PyTorch 2.6+ defaults torch.load to weights_only=True, which rejects
-    # pyannote's checkpoint (contains TorchVersion / OmegaConf objects).
-    # Allowlist the safe ones so the load can proceed.
-    try:
-        import torch.torch_version
-        torch.serialization.add_safe_globals([torch.torch_version.TorchVersion])
-    except Exception:
-        pass
-    try:
-        from omegaconf.listconfig import ListConfig
-        from omegaconf.dictconfig import DictConfig
-        from omegaconf.base import ContainerMetadata, Metadata
-        torch.serialization.add_safe_globals(
-            [ListConfig, DictConfig, ContainerMetadata, Metadata]
-        )
-    except Exception:
-        pass
+    # pyannote's checkpoint. Force weights_only=False for trusted HF repos.
+    _orig_load = torch.load
+    def _patched_load(*a, **kw):
+        kw["weights_only"] = False  # Force override, even if kw has weights_only=None
+        return _orig_load(*a, **kw)
+    torch.load = _patched_load
 
     try:
         pipeline = Pipeline.from_pretrained(
@@ -245,27 +235,13 @@ def load_diarizer():
             use_auth_token=token,
         )
     except Exception as e:
-        # Fallback: monkey-patch torch.load to use weights_only=False for this load.
-        # Safe here because we just downloaded from a trusted HF repo we authenticated to.
-        print(f"  First load attempt failed ({type(e).__name__}); retrying with weights_only=False...")
-        _orig_load = torch.load
-        def _patched_load(*a, **kw):
-            kw.setdefault("weights_only", False)
-            return _orig_load(*a, **kw)
-        torch.load = _patched_load
-        try:
-            pipeline = Pipeline.from_pretrained(
-                "pyannote/speaker-diarization-3.1",
-                use_auth_token=token,
-            )
-        except Exception as e2:
-            print(f"ERROR loading diarization pipeline: {e2}")
-            print("Make sure you accepted terms at:")
-            print("  https://huggingface.co/pyannote/speaker-diarization-3.1")
-            torch.load = _orig_load
-            return None
-        finally:
-            torch.load = _orig_load
+        print(f"ERROR loading diarization pipeline: {e}")
+        print("Make sure you accepted terms at:")
+        print("  https://huggingface.co/pyannote/speaker-diarization-3.1")
+        torch.load = _orig_load
+        return None
+    finally:
+        torch.load = _orig_load
 
     if torch.cuda.is_available():
         pipeline = pipeline.to(torch.device("cuda"))

@@ -82,12 +82,20 @@ PIPELINE_STAGES_PP_FUSION = [
     ("6a", "Second Witness",
      "Whisper-regional (CT2/faster-whisper) batched N-best per segment "
      "(titu = witness #1)"),
-    ("6b", "Fusion + Translation",
-     "Gemma-3-12B reconciles both witnesses AND translates — one call, "
-     "fully local (greedy temp=0, repeat_penalty=1.0; GER + script guard)"),
-    ("6c", "Role Attribution",
-     "one-shot Gemma cluster→role on speaker-pure segments → "
-     "ENUMERATOR / RESPONDENT"),
+    ("6b", "Fusion + Translation + Roles",
+     "Gemma-3-12B reconciles both witnesses, translates and labels "
+     "ENUMERATOR / RESPONDENT per turn — one call, fully local "
+     "(greedy temp=0; GER + script guards)"),
+]
+
+# Bengali fusion: no diarization — roles come from the fusion call (6b).
+PIPELINE_STAGES_BASE_FUSION = [
+    ("1", "Preprocessing", "Audio normalization, VAD-guided chunking"),
+    ("2", "Language Detection", "Identifying languages and routing to engines"),
+    ("3", "Transcription", "titu FastConformer-CTC (witness #1)"),
+    ("3b", "Word Timestamps", "titu native CTC word timestamps"),
+    ("5", "Segments", "One segment per VAD chunk"),
+    ("5b", "Raw Output", "Writing raw titu transcript (pre-LLM)"),
 ]
 
 PIPELINE_STAGES_OUTPUT = [
@@ -97,10 +105,13 @@ PIPELINE_STAGES_OUTPUT = [
 
 def get_pipeline_stages(translation_backend: str = "translategemma") -> list[tuple[str, str, str]]:
     """Build the full pipeline stages list based on the active translation backend."""
-    stages = list(PIPELINE_STAGES_BASE)
     if translation_backend == "fusion":
+        stages = list(PIPELINE_STAGES_BASE_FUSION)
         stages.extend(PIPELINE_STAGES_PP_FUSION)
-    elif translation_backend == "translategemma":
+        stages.extend(PIPELINE_STAGES_OUTPUT)
+        return stages
+    stages = list(PIPELINE_STAGES_BASE)
+    if translation_backend == "translategemma":
         stages.extend(PIPELINE_STAGES_PP_TRANSLATEGEMMA)
     elif translation_backend == "qwen":
         stages.extend(PIPELINE_STAGES_PP_QWEN)

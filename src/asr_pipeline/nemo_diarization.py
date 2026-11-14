@@ -56,9 +56,8 @@ class NemoSpeakerDiarizer:
             logger.info("  NeMo diarization backend available")
         except ImportError:
             raise ImportError(
-                "NeMo toolkit not installed. Install with:\n"
-                "  pip install nemo_toolkit[asr]\n"
-                "Or add the [nemo] extra: pip install -e '.[nemo]'"
+                "NeMo toolkit not installed (it is a core dependency). "
+                "Re-sync the environment: uv sync"
             )
 
     def unload(self) -> None:

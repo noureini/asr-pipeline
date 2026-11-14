@@ -1,0 +1,35 @@
+# =============================================================================
+# Bengali — coastal Bangladesh climate-survey interviews (validated profile)
+# =============================================================================
+# Used by:  just fusion interview.m4a ben
+# Shared settings (Gemma judge, VAD, decoding, guards): fusion_production.yaml
+# =============================================================================
+code: ben
+name: Bengali
+tag: bn                       # [bn] lines in the judge reply and transcript
+
+# Witness 1 · sound: acoustically literal CTC model with word timestamps.
+# fastconformer is the validated default; hishab/titu_stt_bn_conformer_large
+# captures more dialect but correlates with Whisper (A/B on the
+# archive/experiments branch, scripts/ab_titu_variants.py).
+witness_ctc:
+  backend: nemo
+  model: hishab/titu_stt_bn_fastconformer
+  revision: 993316b17c3db56a42bf0140b8ad524f35b4677b
+  batch_size: 8
+
+# Witness 2 · structure: fluent Whisper fine-tune. A dialect-tuned medium model
+# beat a generic large-v3 on coastal dialect.
+witness_whisper:
+  model: bengaliAI/tugstugi_bengaliai-regional-asr_whisper-medium
+  revision: bc519b95ac986f4c732972320052fa1b2c217e8a   # live at validation (June 2026)
+  language: bn
+  ct2_path: models/tugstugi_ct2
+
+# Judge instructions: dialect glossary, survey priors, number rules, roles.
+prompt_file: config/prompts/bn_survey.yaml
+
+# Guards: Bengali + Latin (genuine English code-switches) are allowed; any
+# other script in the output is a hallucination and is blanked.
+scripts: [BENGALI, LATIN]
+unclear_marker: "[অস্পষ্ট]"

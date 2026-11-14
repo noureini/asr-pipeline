@@ -4,10 +4,12 @@
 # These are OPERATIONAL CONFIG, not code: tune the dialect glossary, the
 # fusion rules, or the role definitions here WITHOUT editing Python.
 #
-# Placeholders use $name syntax (Python string.Template — so the literal
-# { } braces in the JSON examples need NO escaping):
+# Placeholders use $name syntax (Python string.Template):
 #   fusion_prompt : $literal    $fluent
-#   role_prompt   : $n          $body
+#
+# Speaker roles (ENUMERATOR / RESPONDENT) are decided INSIDE the fusion call,
+# from what is said: each turn is tagged @ENUMERATOR / @RESPONDENT, and a
+# segment holding a question and its answer is split into two turns.
 # =============================================================================
 
 # --- Stage 6b: two-witness fusion + translation (one Gemma call/segment) ---
@@ -39,15 +41,14 @@ fusion_prompt: |
 
   SCRIPT: write every word in Bengali script, keeping only genuine English code-switches (NGO, loan, bank name) in Latin. If unsure whether a word is English, write it in Bengali. For an unclear Bengali word, keep it in Bengali script or mark [অস্পষ্ট].
 
-  Output a strippable <think> block (1–2 short sentences, no more), then exactly two lines:
-  <think> who is plausibly speaking + what's asked/answered; any content word you overrode and why — keep it to 1–2 short sentences </think>
+  ROLES: label each speaker turn from WHAT IS SAID. ENUMERATOR = the interviewer: asks the survey questions, reads the consent/recording script, gives instructions, probes. RESPONDENT = the interviewee: answers, describing their own family, livelihood, age, floods, crops, money, land. Most utterances are one turn. When the utterance holds a question AND its answer, write two turns in spoken order, splitting only where the speaker changes and keeping every word in exactly one turn.
+
+  Output a strippable <think> block (1–2 short sentences, no more), then one labelled turn per speaker, each turn exactly three lines:
+  <think> who is speaking + what's asked/answered (and where the turn changes, if it does); any content word you overrode and why — keep it to 1–2 short sentences </think>
+  @ENUMERATOR or @RESPONDENT
   [bn] clean coherent Bengali reconciling both readings; unrecoverable → [অস্পষ্ট]
   [en] natural meaning-faithful English of YOUR [bn]; render it entirely in English, keeping only genuine code-switches (place/proper names); unrecoverable → [unclear]
   On the [bn] and [en] lines, write ONLY the final reconciled text as plain prose; put any reasoning, arrows, or alternatives in the reasoning block above.
 
   LITERAL: $literal
   FLUENT (candidate readings): $fluent
-
-# NOTE: the former Stage-6c per-segment role_prompt was REMOVED. Roles now come
-# from the one-shot cluster→role LLM classifier (fusion._decide_roles) applied to
-# the speaker-pure Stage-5 segments — no per-segment role prompt is used.

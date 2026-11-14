@@ -29,10 +29,10 @@ _DEFAULT_CONFIG = Path(__file__).parent / "default.yaml"
 
 # Canonical set of supported ASR engines. force_engine is validated against
 # this at config-LOAD time (via the Literal below), so a YAML typo — e.g.
-# "tito" instead of "titu" — fails LOUDLY at startup rather than silently
+# "ctx" instead of "ctc" — fails LOUDLY at startup rather than silently
 # mis-routing the survey to the wrong (or no) model. Keep in sync with the
 # engine factory (engines/__init__.py create_engine).
-ASREngine = Literal["whisper", "titu", "qwen", "omnilingual", "indic_conformer"]
+ASREngine = Literal["whisper", "ctc", "omnilingual"]
 VALID_ASR_ENGINES = frozenset(get_args(ASREngine))
 
 
@@ -55,9 +55,6 @@ class PipelineConfig(BaseModel):
     # an unknown value raises immediately instead of mis-routing silently.
     # null = use default routing (non-high -> omnilingual).
     force_engine: Optional[ASREngine] = None
-    # IndicConformer decoder strategy when force_engine="indic_conformer".
-    # "rnnt" = more accurate on conjuncts/boundaries; "ctc" = faster.
-    indic_conformer_decoder: str = "rnnt"
 
 
 class LoudnessConfig(BaseModel):
@@ -91,6 +88,10 @@ class ChunkingConfig(BaseModel):
     # default == default.yaml so the pipeline is safe without a YAML override.
     max_duration_s: int = 15
     overlap_s: int = 2
+    # Also cut at every pause of at least this many seconds (turn-aware
+    # pieces for speaker-role labelling). None = WhisperX greedy merge only
+    # (the validated Bengali setting).
+    split_on_pause_s: Optional[float] = None
 
 
 class NoiseReductionConfig(BaseModel):
@@ -136,42 +137,6 @@ class OmnilingualConfig(BaseModel):
     max_audio_length_s: int = 40
 
 
-class TituConfig(BaseModel):
-    """titu CTC grounding-witness selection.
-
-    fastconformer (18,336 hr YouTube, 1024-token tokenizer) is the validated
-    default: its standard orthography is COMPLEMENTARY to the dialectal Whisper
-    witness in fusion (maximizes ensemble diversity) and is clean for the
-    downstream Bengali number-word detection. conformer_large (4.4K hr
-    non-telephony, 128-token near-character tokenizer) captures more dialect +
-    content (incl. survey-critical flood months) but correlates with Whisper and
-    emits phonetic non-standard spelling — kept as a one-line A/B switch.
-    Compare with scripts/ab_titu_variants.py. Literal-validated so a typo fails
-    at config load.
-    """
-    model_id: Literal[
-        "hishab/titu_stt_bn_fastconformer",
-        "hishab/titu_stt_bn_conformer_large",
-    ] = "hishab/titu_stt_bn_fastconformer"
-    batch_size: int = 8
-
-
-class QwenConfig(BaseModel):
-    """Qwen3-ASR engine — default ASR for non-high-resource languages.
-
-    Bengali is not in Qwen3-ASR's official language list but the model
-    produces usable Bengali (validated ~8.5% CER on FLEURS). `language`
-    is the optional Qwen language hint ("Bengali", "English", ...);
-    None = auto-detect (the validated mode).
-    """
-
-    model: str = "Qwen/Qwen3-ASR-1.7B"
-    language: Optional[str] = None       # None = auto-detect
-    dtype: str = "bfloat16"              # bfloat16 | float16 | float32
-    device_map: str = "cuda:0"           # "cpu" for CPU-only boxes
-    max_audio_length_s: int = 30
-
-
 class NemoMsddConfig(BaseModel):
     """NeMo MSDD-specific diarization settings."""
 
@@ -183,6 +148,9 @@ class NemoMsddConfig(BaseModel):
 
 
 class DiarizationConfig(BaseModel):
+    # Voice diarization (speaker clusters). The Bengali fusion path turns it
+    # OFF: the fusion LLM labels ENUMERATOR / RESPONDENT from what is said.
+    enabled: bool = True
     backend: Literal["pyannote", "nemo_msdd"] = "pyannote"
     # community-1 (2025) is the actively-maintained pyannote pipeline: exclusive
     # frame-level diarization + stronger on noisy/multi-speaker audio. Ties 3.1
@@ -297,18 +265,16 @@ class QwenTranslatorConfig(QwenLLMConfig):
 
 class FusionConfig(BaseModel):
     """Two-witness fusion + translation (the validated production post-ASR
-    stage). titu (primary engine) ‖ Whisper-regional (second witness, CT2) →
-    Gemma-3-12B reconciles into clean Bengali [bn] AND translates to English
-    [en] in ONE call. Fully local, fully open, hallucination-resistant."""
+    stage): CTC witness ‖ Whisper witness → Gemma-3-12B reconciles, translates
+    to English and labels speaker roles in ONE call. Fully local and open.
 
-    whisper_model: str = (
-        "bengaliAI/tugstugi_bengaliai-regional-asr_whisper-medium")
-    # Local CT2/faster-whisper conversion of whisper_model. Enables batched
-    # N-best ~1.9x faster than HF transformers (A/B-validated 2026-06-25).
-    # Missing path / "" → automatic fallback to the HF transformers backend.
-    whisper_ct2_path: str = "models/tugstugi_ct2"
+    Shared across languages. The two witness models, the prompt and the
+    script rules come from the language profile (languages/<code>.yaml)."""
+
+    # Hugging Face commit of the judge GGUF (reproducibility). None = latest.
+    gguf_revision: Optional[str] = None
     # Chunks per Whisper GPU forward pass (intra-stage parallelism).
-    # 8 fits the 8GB card with titu unloaded; per-item OOM fallback.
+    # 8 fits the 8GB card with the CTC witness unloaded; per-item OOM fallback.
     whisper_batch_size: int = 8
     # N-best: Whisper returns this many candidate readings per segment
     # (beam search) so Gemma reconciles MULTIPLE hypotheses (SOTA GER) —
@@ -331,6 +297,10 @@ class FusionConfig(BaseModel):
     # Falls back to in-process if the server binary/start fails.
     fusion_backend: Literal["inprocess", "server"] = "inprocess"
     n_parallel: int = 3              # llama-server slots (8GB fits ~3)
+    # Constrain the judge reply to the @ROLE / [tag] / [en] format with a
+    # GBNF grammar (llama.cpp, in-process backend). Off by default: the
+    # Bengali setup was validated without it.
+    constrain_format: bool = False
     server_port: int = 8081
 
     # ── Generation hyperparameters ────────────────────────────────────
@@ -373,7 +343,7 @@ class FusionConfig(BaseModel):
     # is derived from the same template (only the <think> block differs), so
     # the comparison is clean. Flip this for the second eval run.
     fusion_think: bool = True
-    # GER guard: constrain the fused [bn] to the witness pool (titu + Whisper
+    # GER guard: constrain the fused [bn] to the witness pool (CTC witness + Whisper
     # N-best) — closest-to-N-best snap + fabricated-number abstain + agreement
     # flags. Training-free, deterministic, grapheme-level. Toggle off to A/B.
     ger_guard: bool = True
@@ -383,15 +353,8 @@ class FusionConfig(BaseModel):
     # clobbers good reconciliations. (Number-abstain + flags work regardless.)
     ger_snap: bool = False
     ger_snap_tau: float = 0.72      # CALIBRATE from your slice before trusting
-    # Roles (ENUMERATOR / RESPONDENT) now come from Stage-5 word-level
-    # speaker attribution (titu CTC word timestamps → speaker-pure segments
-    # → one-time cluster→role mapping in alignment.map_speakers_to_roles).
-    # The old per-segment LLM role-attribution stage has been removed.
-    # ── Prompt templates (operational config, not code) ───────────────
-    # Path (relative to repo root or absolute) to the YAML holding
-    # `fusion_prompt`. Built-in default is used if the file is missing,
-    # so existing configs keep working.
-    prompts_file: str = "config/prompts/bn_survey.yaml"
+    # Roles (ENUMERATOR / RESPONDENT) are labelled per turn inside the
+    # fusion call, from what is said (no diarization on this path).
 
 
 class PostprocessingConfig(BaseModel):
@@ -441,8 +404,6 @@ class AppConfig(BaseModel):
     languages: dict[str, LanguageConfig] = Field(default_factory=dict)
     whisper: WhisperConfig = Field(default_factory=WhisperConfig)
     omnilingual: OmnilingualConfig = Field(default_factory=OmnilingualConfig)
-    qwen: QwenConfig = Field(default_factory=QwenConfig)
-    titu: TituConfig = Field(default_factory=TituConfig)
     diarization: DiarizationConfig = Field(default_factory=DiarizationConfig)
     alignment: AlignmentConfig = Field(default_factory=AlignmentConfig)
     postprocessing: PostprocessingConfig = Field(default_factory=PostprocessingConfig)
@@ -466,10 +427,13 @@ class AppConfig(BaseModel):
         """Return the ASR engine name for a given language code.
 
         Priority:
-          1. High-resource → Whisper
-          2. Otherwise → Qwen3-ASR (default; Omnilingual remains
-             available via explicit config/override)
+          1. Fusion pipeline → the language profile's CTC witness ("ctc")
+          2. High-resource → Whisper
+          3. pipeline.force_engine, if set
+          4. Otherwise → Omnilingual
         """
+        if self.postprocessing.translation_backend == "fusion":
+            return "ctc"
         lang = self.get_language(code)
         if lang.tier == LanguageTier.HIGH:
             return "whisper"
@@ -477,9 +441,7 @@ class AppConfig(BaseModel):
             return self.pipeline.force_engine
         # Default for non-high-resource: Omnilingual. Measured ~6.8% CER
         # (num-normalized) on FLEURS Bengali, fully local/private —
-        # vs Qwen3-ASR-1.7B's 34% (no Bengali) and Qwen-Flash being
-        # cloud-only (unusable for survey PII). Override with
-        # pipeline.force_engine for A/B testing.
+        # Override with pipeline.force_engine.
         return "omnilingual"
 
 

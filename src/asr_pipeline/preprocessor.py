@@ -263,14 +263,11 @@ class AudioPreprocessor:
     # ─────────────────────────────────────────────────────────────────
 
     def _get_vad_model(self) -> torch.nn.Module:
-        """Lazily load Silero VAD model."""
+        """Lazily load Silero VAD from the installed (version-locked)
+        silero-vad package — bundled weights, no network fetch."""
         if self._vad_model is None:
-            model, _ = torch.hub.load(
-                repo_or_dir="snakers4/silero-vad",
-                model="silero_vad",
-                trust_repo=True,
-            )
-            self._vad_model = model
+            from silero_vad import load_silero_vad
+            self._vad_model = load_silero_vad()
         return self._vad_model
 
     def _detect_speech(
@@ -400,10 +397,16 @@ class AudioPreprocessor:
         for s, e in speech_timestamps:
             norm_segs.extend(_split_quiet(s, e))
 
+        # Optional turn-aware cut: also close the chunk at any pause of at
+        # least `split_on_pause_s`. Speaker changes almost always come with
+        # a pause, so pieces then mostly hold ONE speaker and the judge can
+        # label each piece's role (it does not split mixed pieces itself).
+        pause = self._config.chunking.split_on_pause_s
         final_boundaries: list[tuple[float, float]] = []
         cs, ce = norm_segs[0]
         for s, e in norm_segs[1:]:
-            if e - cs > max_dur and ce - cs > 0:
+            long_pause = pause is not None and s - ce >= pause
+            if (e - cs > max_dur or long_pause) and ce - cs > 0:
                 final_boundaries.append((cs, ce))
                 cs = s
             ce = e

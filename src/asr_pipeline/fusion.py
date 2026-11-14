@@ -3,18 +3,19 @@
 The validated post-ASR architecture (ROVER complementary-systems +
 generative error correction + GenTranslate):
 
-  titu (CTC, phonetically faithful) ‖ Whisper-regional (seq2seq, fluent)
-     → Gemma-3-12B fusion judge   (reconcile the two witnesses into clean
-                                    Bengali [bn] AND translate to English [en]
-                                    in ONE call; [en] is A/B-validated faithful)
+  CTC witness (phonetically faithful) ‖ Whisper witness (seq2seq, fluent)
+     → Gemma-3-12B fusion judge   (reconcile the two witnesses into one clean
+                                    native line AND translate to English [en]
+                                    AND label speaker roles, in ONE call)
 
   Whisper witness uses CT2/faster-whisper (batched N-best, ~1.9x faster) with
-  an HF transformers fallback. (A former IndicTrans2 NMT stage was removed —
-  it was never called; Gemma does the translation.)
+  an HF transformers fallback.
 
-titu is the pipeline's primary engine, so its per-segment text arrives
-as AlignedSegment.raw_text. This stage runs Whisper as the SECOND witness
-on each segment's audio slice, fuses, and translates.
+The witnesses, prompt, output tag and script rules come from the language
+profile (languages/<code>.yaml; Bengali: titu ‖ regional Whisper). The CTC
+witness is the pipeline's primary engine, so its per-segment text arrives as
+AlignedSegment.raw_text. This stage runs Whisper as the SECOND witness on
+each segment's audio slice, fuses, translates and labels roles.
 
 Fully local, fully open. No frontier API. Empirically beats single-ASR +
 LLM-correction: recovers semantic near-misses (flood vs "sister-no"),
@@ -30,6 +31,7 @@ from pathlib import Path
 from typing import Optional
 
 from asr_pipeline.models import AlignedSegment, ProcessedSegment
+from asr_pipeline.profiles import REPO_ROOT, LanguageProfile, load_profile
 
 logger = logging.getLogger("asr_pipeline")
 
@@ -97,10 +99,20 @@ code-switches (NGO, loan, bank name) in Latin. If unsure whether a word is \
 English, write it in Bengali. For an unclear Bengali word, keep it in \
 Bengali script or mark [অস্পষ্ট].
 
+ROLES: label each speaker turn from WHAT IS SAID. ENUMERATOR = the \
+interviewer: asks the survey questions, reads the consent/recording \
+script, gives instructions, probes. RESPONDENT = the interviewee: answers, \
+describing their own family, livelihood, age, floods, crops, money, land. \
+Most utterances are one turn. When the utterance holds a question AND its \
+answer, write two turns in spoken order, splitting only where the speaker \
+changes and keeping every word in exactly one turn.
+
 Output a strippable <think> block (1–2 short sentences, no more), then \
-exactly two lines:
-<think> who is plausibly speaking + what's asked/answered; any content \
-word you overrode and why — keep it to 1–2 short sentences </think>
+one labelled turn per speaker, each turn exactly three lines:
+<think> who is speaking + what's asked/answered (and where the turn \
+changes, if it does); any content word you overrode and why — keep it to \
+1–2 short sentences </think>
+@ENUMERATOR or @RESPONDENT
 [bn] clean coherent Bengali reconciling both readings; unrecoverable → \
 [অস্পষ্ট]
 [en] natural meaning-faithful English of YOUR [bn]; render it entirely in \
@@ -114,25 +126,7 @@ LITERAL: $literal
 FLUENT (candidate readings): $fluent"""
 
 
-# One-shot cluster→role classifier. Reads each diarized speaker's aggregated
-# Bengali and decides who is the interviewer. Runs ONCE per interview (not
-# per segment) and only outputs a single letter — it never rewrites text, so
-# it cannot fabricate. Replaces the unreliable consent-keyword / most-speech
-# heuristic (keywords are English ASCII but titu writes Bengali script).
-_ROLE_CLASSIFY_PROMPT = """\
-This is a survey interview from a climate-risk study in coastal Bangladesh.
-Exactly one speaker is the ENUMERATOR (the interviewer: ASKS the survey
-questions, reads the consent/recording script, gives instructions, probes —
-e.g. "what is...?", "do you...?", "tell me about...", asks name/age/household).
-The other speaker(s) are the RESPONDENT (the interviewee: ANSWERS, describing
-their OWN life — family, livelihood, age, floods, crops, money, land).
-
-Below is each speaker's transcribed Bengali (their lines concatenated):
-
-$speakers
-
-Which speaker is the ENUMERATOR (the one ASKING questions and reading the
-consent script)? Answer with EXACTLY ONE letter ($letters) and nothing else."""
+_ROLES = ("ENUMERATOR", "RESPONDENT")
 
 
 def load_prompts(prompts_file: Optional[str]) -> dict:
@@ -162,6 +156,30 @@ def load_prompts(prompts_file: Optional[str]) -> dict:
     return prompts
 
 
+def fusion_grammar(tag: str, think: bool = True) -> str:
+    """GBNF grammar for the judge's reply: optional <think> block, then one
+    or more role-labelled turns of exactly three lines. With constrained
+    decoding the reply can no longer drop the @ROLE / [tag] / [en] labels
+    (13-20% of Nepali replies did without it)."""
+    think_rule = 'think? ' if think else ''
+    return (
+        f'root ::= {think_rule}turn+\n'
+        'think ::= "<think>" [^<]* "</think>" "\\n"+\n'
+        f'turn ::= "@" role "\\n" "[{tag}] " line "\\n" "[en] " line "\\n"?\n'
+        'role ::= "ENUMERATOR" | "RESPONDENT"\n'
+        'line ::= [^\\n]+\n')
+
+
+def _context_line(role: Optional[str], text: str, max_words: int = 40) -> str:
+    """The previous segment, as shown to the judge for speaker continuity:
+    its role (if known) and its last `max_words` words."""
+    words = (text or "").split()
+    tail = " ".join(words[-max_words:])
+    if len(words) > max_words:
+        tail = "… " + tail
+    return f"{role or 'speaker unknown'}: {tail}" if tail else "(silence)"
+
+
 def _strip_think(text: str) -> str:
     """Return the post-reasoning body: drop everything up to and including
     </think> so a stray "[bn]"/"@ROLE" inside the reasoning can't match. A
@@ -174,13 +192,15 @@ def _strip_think(text: str) -> str:
     return text
 
 
-def _parse_bn_en(text: str) -> tuple[str, str]:
-    """Pull the [bn] and [en] lines from one turn's text (already <think>-
-    and @ROLE-delimited by the caller; strip any stray <think> too)."""
+def _parse_bn_en(text: str, tag: str = "bn") -> tuple[str, str]:
+    """Pull the native-language line ([bn], [ne] … per the profile's `tag`)
+    and the [en] line from one turn's text (already <think>- and
+    @ROLE-delimited by the caller; strip any stray <think> too)."""
     if not text:
         return "", ""
     text = _strip_think(text)
-    bn = re.search(r"\[bn\]\s*(.+?)(?=\n*\[en\]|\Z)", text, re.S)
+    bn = re.search(rf"\[{re.escape(tag)}\]\s*(.+?)(?=\n*\[en\]|\Z)",
+                   text, re.S)
     en = re.search(r"\[en\]\s*(.+)", text, re.S)
     bn_t = re.sub(r"\s+", " ", bn.group(1)).strip() if bn else ""
     en_t = re.sub(r"\s+", " ", en.group(1)).strip() if en else ""
@@ -191,7 +211,7 @@ def _parse_bn_en(text: str) -> tuple[str, str]:
 _ROLE_MARK = re.compile(r"@\s*(ENUMERATOR|RESPONDENT)\b", re.I)
 
 
-def _parse_fusion(text: str) -> tuple[str, list[tuple]]:
+def _parse_fusion(text: str, tag: str = "bn") -> tuple[str, list[tuple]]:
     """Parse a fusion reply into (think, turns).
 
     `turns` is a list of (role, bn, en) — ONE per speaker turn. The prompt
@@ -216,11 +236,11 @@ def _parse_fusion(text: str) -> tuple[str, list[tuple]]:
     if marks:
         for j, mk in enumerate(marks):
             end = marks[j + 1].start() if j + 1 < len(marks) else len(body)
-            bn, en = _parse_bn_en(body[mk.end():end])
+            bn, en = _parse_bn_en(body[mk.end():end], tag)
             if bn or en:
                 turns.append((mk.group(1).upper(), bn, en))
     else:                                  # no @ROLE → one untagged turn
-        bn, en = _parse_bn_en(body)
+        bn, en = _parse_bn_en(body, tag)
         if bn or en:
             turns.append((None, bn, en))
     return think, turns
@@ -280,12 +300,11 @@ class FusionTranslator:
 
     def __init__(
         self,
+        profile: Optional[LanguageProfile] = None,
         device: str = "cuda",
-        whisper_model: str =
-        "bengaliAI/tugstugi_bengaliai-regional-asr_whisper-medium",
-        whisper_ct2_path: str = "models/tugstugi_ct2",
         gguf_repo: str = "unsloth/gemma-3-12b-it-GGUF",
         gguf_file: str = "gemma-3-12b-it-UD-Q4_K_XL.gguf",
+        gguf_revision: Optional[str] = None,
         gguf_n_gpu_layers: int = -1,
         # 0 = OFF. Must stay 0 for the in-process gemma backend: prompt-lookup
         # speculative decoding crashes llama-cpp here ("could not broadcast
@@ -308,16 +327,31 @@ class FusionTranslator:
         ger_guard: bool = True,
         ger_snap: bool = False,
         ger_snap_tau: float = 0.72,
-        prompts_file: Optional[str] = "config/prompts/bn_survey.yaml",
         fusion_backend: str = "inprocess",
         n_parallel: int = 3,
         server_port: int = 8081,
+        constrain_format: bool = False,
     ) -> None:
+        # Language-specific parts: Whisper witness, prompt, tag, scripts.
+        self._profile = profile or load_profile("ben")
+        ww = self._profile.witness_whisper
+        self._tag = self._profile.tag
+        self._whisper_model = ww.model
+        self._whisper_revision = ww.revision
+        self._whisper_language = ww.language
+        # CT2 copy of the Whisper witness, relative to the repo root.
+        self._whisper_ct2_path = (
+            str(ww.ct2_path if Path(ww.ct2_path).is_absolute()
+                else REPO_ROOT / ww.ct2_path) if ww.ct2_path else "")
+        # GER guard: which scripts may appear, what replaces unclear text.
+        self._script_rules = {
+            "scripts": tuple(self._profile.scripts),
+            "unclear_marker": self._profile.unclear_marker,
+        }
         self._device = device
-        self._whisper_model = whisper_model
-        self._whisper_ct2_path = whisper_ct2_path
         self._gguf_repo = gguf_repo
         self._gguf_file = gguf_file
+        self._gguf_revision = gguf_revision
         self._gguf_n_gpu_layers = gguf_n_gpu_layers
         self._prompt_lookup_tokens = prompt_lookup_tokens
         self._whisper_batch_size = whisper_batch_size
@@ -326,7 +360,7 @@ class FusionTranslator:
         self._n_parallel = n_parallel
         self._server_port = server_port
         # Generation hyperparameters (Gemma-team config + fixed seed →
-        # reproducible). The cluster→role classifier overrides to greedy.
+        # reproducible). Production runs greedy (temperature 0).
         self._temperature = temperature
         self._top_p = top_p
         self._top_k = top_k
@@ -343,8 +377,15 @@ class FusionTranslator:
         # fusion stat accumulators (also reset per-interview in process();
         # init here so _run_fusion is safe to call standalone in scripts).
         self._reset_fusion_stats()
-        # Prompt templates (operational config — editable YAML).
-        prompts = load_prompts(prompts_file)
+        # Judge prompt from the profile (operational config — editable YAML).
+        # No silent fallback: the built-in prompt is Bengali-only.
+        prompt_path = self._profile.prompt_path
+        if not prompt_path.exists():
+            raise FileNotFoundError(
+                f"Prompt file for '{self._profile.code}' not found: "
+                f"{prompt_path} (set prompt_file in "
+                f"languages/{self._profile.code}.yaml)")
+        prompts = load_prompts(str(prompt_path))
         self._fusion_prompt = prompts["fusion_prompt"]
         # Ablation: think-on (default) vs the matched think-off arm. Derived
         # from the same prompt so the only difference is the <think> block.
@@ -352,6 +393,12 @@ class FusionTranslator:
         if not fusion_think:
             self._fusion_prompt = _strip_think_instruction(self._fusion_prompt)
             logger.info("  fusion: think-OFF arm (no <think> block)")
+        # Constrained decoding (GBNF) of the reply format; in-process only.
+        self._grammar = (fusion_grammar(self._tag, think=fusion_think)
+                         if constrain_format else None)
+        if constrain_format and fusion_backend == "server":
+            logger.warning("  constrain_format is ignored by the server "
+                           "backend (in-process only)")
 
     # ── second witness: Whisper-regional, BATCHED across chunks ───────
     #    Intra-stage parallelism: many chunks per GPU forward pass via
@@ -366,12 +413,28 @@ class FusionTranslator:
         A/B-validated) when the local CT2 conversion exists; otherwise fall
         back to the HF transformers path."""
         from pathlib import Path as _P
+        ww = self._profile.witness_whisper
+        if ww.ct2_subfolder:
+            # ready CT2 conversion inside the model repo (cached by
+            # download_models.py; offline-safe once downloaded)
+            from huggingface_hub import snapshot_download
+            snap = snapshot_download(
+                ww.model, revision=ww.revision,
+                allow_patterns=[f"{ww.ct2_subfolder}/*"],
+                local_files_only=True)
+            self._whisper_ct2_path = str(_P(snap) / ww.ct2_subfolder)
         if self._whisper_ct2_path and _P(self._whisper_ct2_path).exists():
             try:
                 return self._run_whisper_ct2(aligned, wav_path)
             except Exception as ex:
+                if ww.prefix_tokens:
+                    raise          # mode tokens are CT2-only: no fallback
                 logger.warning("  CT2 Whisper failed (%s) — falling back to "
                                "HF transformers", type(ex).__name__)
+        if ww.prefix_tokens:
+            raise ValueError(
+                "witness_whisper.prefix_tokens need a CT2 model "
+                "(ct2_path or ct2_subfolder)")
         return self._run_whisper_hf(aligned, wav_path)
 
     def _run_whisper_ct2(self, aligned: list[AlignedSegment],
@@ -399,8 +462,17 @@ class FusionTranslator:
             compute_type="int8_float16" if use_cuda else "int8")
         fe = wm.feature_extractor
         tok = Tokenizer(wm.hf_tokenizer, multilingual=True,
-                        task="transcribe", language="bn")
-        prompt = list(tok.sot_sequence) + [tok.no_timestamps]
+                        task="transcribe", language=self._whisper_language)
+        # [sot, <mode tokens…>, <|lang|>, <|transcribe|>, <|notimestamps|>]
+        prefix = []
+        for t in self._profile.witness_whisper.prefix_tokens:
+            tid = wm.hf_tokenizer.token_to_id(t)
+            if tid is None:
+                raise ValueError(f"prefix token {t!r} not in the Whisper "
+                                 f"witness vocabulary")
+            prefix.append(tid)
+        sot = list(tok.sot_sequence)
+        prompt = sot[:1] + prefix + sot[1:] + [tok.no_timestamps]
         # Seed CT2's RNG so the sampled N-best is reproducible run-to-run
         # (matches the Gemma fixed-seed → fully deterministic deliverable).
         ctranslate2.set_random_seed(self._seed)
@@ -440,7 +512,12 @@ class FusionTranslator:
                 for (oi, _), r in zip(batch, res):
                     hyps, seen = [], set()
                     for ids in r.sequences_ids:
-                        txt = tok.decode(ids).strip()
+                        # full tokenizer, not tok.decode: faster-whisper's
+                        # decode drops every id >= <|endoftext|>, i.e. all
+                        # tokens a fine-tune ADDED to the vocabulary (e.g.
+                        # Sagarmatha's 2,000 Devanagari tokens).
+                        txt = wm.hf_tokenizer.decode(
+                            ids, skip_special_tokens=True).strip()
                         if txt and txt not in seen:
                             seen.add(txt); hyps.append(txt)
                     out[oi] = hyps or [""]
@@ -486,18 +563,20 @@ class FusionTranslator:
             logger.info("    GPU free: %.2f / %.2f GB",
                         free_b / 1e9, total_b / 1e9)
 
-        processor = AutoProcessor.from_pretrained(self._whisper_model)
+        processor = AutoProcessor.from_pretrained(
+            self._whisper_model, revision=self._whisper_revision)
         # SDPA attention (PyTorch-native flash-attention path): ~1.5-2x
         # faster + lower memory than eager, no flash-attn build needed.
         # The "insanely fast whisper" win that applies to our exact
         # regional model. Fall back to eager if unsupported.
         try:
             model = AutoModelForSpeechSeq2Seq.from_pretrained(
-                self._whisper_model, torch_dtype=dtype,
-                attn_implementation="sdpa")
+                self._whisper_model, revision=self._whisper_revision,
+                torch_dtype=dtype, attn_implementation="sdpa")
         except Exception:
             model = AutoModelForSpeechSeq2Seq.from_pretrained(
-                self._whisper_model, torch_dtype=dtype)
+                self._whisper_model, revision=self._whisper_revision,
+                torch_dtype=dtype)
         model.to(dev).eval()
 
         wav, sr = torchaudio.load(str(wav_path))
@@ -533,9 +612,12 @@ class FusionTranslator:
                     gen = model.generate(
                         feats, do_sample=True, temperature=0.5,
                         top_p=0.9, num_return_sequences=nbest,
-                        max_new_tokens=256)
+                        language=self._whisper_language,
+                        task="transcribe", max_new_tokens=256)
                 else:
-                    gen = model.generate(feats, max_new_tokens=256)
+                    gen = model.generate(
+                        feats, language=self._whisper_language,
+                        task="transcribe", max_new_tokens=256)
             flat = processor.batch_decode(gen, skip_special_tokens=True)
             # generate() returns sequences grouped by input then beam:
             # [in0_b0, in0_b1, ..., in1_b0, ...]. Regroup + dedupe.
@@ -599,63 +681,30 @@ class FusionTranslator:
         return "\n".join(f"  ({chr(97 + j)}) {h}"
                          for j, h in enumerate(whyps))
 
-    # ── one-shot cluster→role classification (replaces the heuristic) ──
-    def _decide_roles(self, aligned: list[AlignedSegment], gen_fn) -> dict:
-        """Decide {SPEAKER_xx: ENUMERATOR|RESPONDENT} once for the interview.
-
-        Primary: ONE LLM call reading each cluster's aggregated Bengali
-        (works on Bengali script, unlike the ASCII consent-keyword match).
-        Fallback: the heuristic `decide_role_map` if the call fails / is
-        ambiguous. `gen_fn(prompt) -> str` is the backend's generate.
-        """
-        from collections import defaultdict
-        from asr_pipeline.alignment import decide_role_map
-
-        texts: dict[str, list[str]] = defaultdict(list)
-        for s in aligned:
-            if (s.raw_text or "").strip():
-                texts[s.speaker_id].append(s.raw_text.strip())
-        clusters = sorted(texts.keys())
-
-        if len(clusters) < 2:
-            return decide_role_map(aligned)   # single cluster / empty
-
-        letters = [chr(ord("A") + i) for i in range(len(clusters))]
-        blocks = "\n\n".join(
-            f"Speaker {L} ({c}):\n{' '.join(texts[c])[:900]}"
-            for L, c in zip(letters, clusters))
-        from string import Template
-        prompt = Template(_ROLE_CLASSIFY_PROMPT).safe_substitute(
-            speakers=blocks, letters="/".join(letters))
-        try:
-            reply = gen_fn(prompt) or ""
-        except Exception as ex:
-            logger.warning("  role classify call failed (%s) — heuristic "
-                           "fallback", type(ex).__name__)
-            return decide_role_map(aligned)
-
-        pick = next((ch for ch in reply if ch in letters), None)
-        if pick is None:
-            logger.warning("  role classify gave no clear answer (%r) — "
-                           "heuristic fallback", reply.strip()[:40])
-            return decide_role_map(aligned)
-
-        enum = clusters[letters.index(pick)]
-        mapping = {c: ("ENUMERATOR" if c == enum else "RESPONDENT")
-                   for c in clusters}
-        logger.info("  ✓ Roles (LLM classifier): %s → ENUMERATOR; "
-                    "%d cluster(s) → RESPONDENT", enum, len(clusters) - 1)
-        return mapping
+    def _finish_segment(self, i: int, ans: str, meta: dict, literal: str,
+                        whyps: list[str], error: str = "") -> list[tuple]:
+        """Parse one fusion reply into role-labelled turns, record it, and
+        run the GER guard. A reply with no usable turn (error, <think>
+        overrun) falls back to one FLUENT-raw turn so the segment never
+        vanishes. Returns the final [(role, bn, en), …]."""
+        wt = whyps[0] if whyps else ""
+        think, turns = _parse_fusion(ans, self._tag) if not error else ("", [])
+        self._record_fusion(i, think, turns, meta, wt, error=error)
+        if not any((t[1] or "").strip() for t in turns):
+            turns = [(None, wt, "")]
+        turns = self._apply_ger(i, turns, literal, whyps)
+        self._fusion_turns[i] = turns
+        return turns
 
     def _run_fusion(self, aligned: list[AlignedSegment],
-                    titu_texts: list[str],
+                    ctc_texts: list[str],
                     whisper_nbest: list[list[str]]
                     ) -> tuple[list[str], list[str]]:
         from asr_pipeline.postprocessor import GGUFProcessor
 
         logger.info("  Fusion 2/2: Gemma-3 fusion + translation "
                     f"({self._gguf_file})")
-        # Aggressively release any VRAM PyTorch (titu/Whisper) still holds
+        # Aggressively release any VRAM PyTorch (CTC witness/Whisper) still holds
         # before llama.cpp loads Gemma — otherwise the reserved-but-unused
         # torch pool shrinks what's physically free for the 7GB model +
         # KV, forcing PCIe paging (slow decode). Then LOG the actual free
@@ -676,21 +725,20 @@ class FusionTranslator:
         tpl = Template(self._fusion_prompt)
         proc = GGUFProcessor(
             gguf_repo=self._gguf_repo, gguf_file=self._gguf_file,
-            n_ctx=self._n_ctx, n_gpu_layers=self._gguf_n_gpu_layers,
+            gguf_revision=self._gguf_revision, n_ctx=self._n_ctx,
+            n_gpu_layers=self._gguf_n_gpu_layers,
             prompt_lookup_tokens=self._prompt_lookup_tokens,
             flash_attn=self._flash_attn, kv_quant=self._kv_quant)
         if not proc.load():
             logger.warning("  fusion judge unavailable — falling back to "
-                           "titu text unchanged (no translation)")
-            return list(titu_texts), [""] * len(titu_texts)
-        # Decide cluster→role ONCE (Gemma is loaded) before per-segment work.
-        # GREEDY (temp=0) — a single-letter classification must be deterministic,
-        # not sampled (validated: greedy picks the enumerator reliably).
-        self._cluster_role_map = self._decide_roles(
-            aligned, lambda p: proc.generate(
-                p, temperature=0.0, top_p=1.0, max_tokens=8))
+                           "CTC witness text unchanged (no translation)")
+            return list(ctc_texts), [""] * len(ctc_texts)
         bn_out, en_out = [], []
-        for i, (tt, whyps) in enumerate(zip(titu_texts, whisper_nbest)):
+        # Speaker continuity: prompts with a $previous placeholder get the
+        # previous segment's reconciled text and role (segments are cut at
+        # ~15 s and often continue the same speaker's sentence).
+        previous = "(start of the recording)"
+        for i, (tt, whyps) in enumerate(zip(ctc_texts, whisper_nbest)):
             tt = (tt or "").strip()
             whyps = [h.strip() for h in (whyps or []) if h and h.strip()]
             wt = whyps[0] if whyps else ""   # top whisper hypothesis
@@ -701,39 +749,35 @@ class FusionTranslator:
             if not wt:                     # only one witness → pass through
                 bn_out.append(tt)
                 en_out.append("")
+                previous = _context_line(None, tt)
                 continue
             prompt = tpl.safe_substitute(literal=tt or "(none)",
-                                         fluent=self._fmt_fluent(whyps))
+                                         fluent=self._fmt_fluent(whyps),
+                                         previous=previous)
             try:
-                # [bn] + [en] + reasoning in one call; meta carries the
-                # truncation signal (finish_reason) and output token count.
+                # role-labelled [bn] + [en] turns + reasoning in one call;
+                # meta carries the truncation signal (finish_reason) and
+                # output token count.
                 ans, meta = proc.generate(
                     prompt, temperature=self._temperature,
                     top_p=self._top_p, top_k=self._top_k,
                     min_p=self._min_p, repeat_penalty=self._repeat_penalty,
                     seed=self._seed, max_tokens=self._fusion_max_tokens,
-                    return_meta=True)
-                think, turns = _parse_fusion(ans)
-                self._record_fusion(i, think, turns, meta, wt)
-                # never emit empty: no parseable turn means the LLM gave no
-                # usable reading (often a <think> overrun) — process() falls
-                # back to the FLUENT raw line so the segment never vanishes.
-                bn = (turns[0][1] if turns else "") or wt
-                en = turns[0][2] if turns else ""
+                    grammar=self._grammar, return_meta=True)
+                turns = self._finish_segment(i, ans, meta, tt, whyps)
             except Exception as ex:
                 logger.warning("  fusion seg %d failed: %s", i,
                                type(ex).__name__)
-                self._record_fusion(i, "", [], {}, wt,
-                                    error=type(ex).__name__)
-                bn, en = wt, ""
-            bn, en = self._apply_ger(i, bn, en, tt, whyps)
-            bn_out.append(bn)
-            en_out.append(en)
+                turns = self._finish_segment(i, "", {}, tt, whyps,
+                                             error=type(ex).__name__)
+            bn_out.append(" ".join(t[1] for t in turns if t[1]))
+            en_out.append(" ".join(t[2] for t in turns if t[2]))
+            previous = _context_line(turns[-1][0], turns[-1][1])
             if (i + 1) % 25 == 0:
                 logger.info("    fused+translated %d/%d", i + 1,
-                            len(titu_texts))
+                            len(ctc_texts))
         proc.unload()
-        self._log_ger_summary(len(titu_texts))
+        self._log_ger_summary(len(ctc_texts))
         return bn_out, en_out
 
     # NOTE: translation is done by Gemma in the fusion call (the [en] line) —
@@ -741,22 +785,13 @@ class FusionTranslator:
     # removed (it was never called; Gemma [en] was A/B-validated as faithful).
 
     # ── server-backed (parallel / continuous-batching) fusion + roles ─
-    def _run_fusion_server(self, server, aligned, titu_texts, whisper_nbest):
+    def _run_fusion_server(self, server, aligned, ctc_texts, whisper_nbest):
         from string import Template
-        # Decide cluster→role ONCE via the server (one short request).
-        # GREEDY (temp=0) — a single-letter classification must be deterministic
-        # regardless of the fusion sampling temperature (mirrors the in-process
-        # path). Do NOT use self._temperature here: at Gemma-rec temp=1.0 it
-        # would sample the role pick.
-        self._cluster_role_map = self._decide_roles(
-            aligned, lambda p: (server.generate_batch(
-                [p], max_tokens=8, temperature=0.0,
-                top_p=1.0) or [""])[0])
         tpl = Template(self._fusion_prompt)
-        n = len(titu_texts)
+        n = len(ctc_texts)
         bn_out, en_out = [""] * n, [""] * n
         idxs, prompts = [], []
-        for i, (tt, whyps) in enumerate(zip(titu_texts, whisper_nbest)):
+        for i, (tt, whyps) in enumerate(zip(ctc_texts, whisper_nbest)):
             tt = (tt or "").strip()
             whyps = [h.strip() for h in (whyps or []) if h and h.strip()]
             wt = whyps[0] if whyps else ""
@@ -766,24 +801,25 @@ class FusionTranslator:
                 bn_out[i] = tt
                 continue
             idxs.append(i)
+            # batched: no reconciled previous turn yet → raw previous text
+            prev_raw = (ctc_texts[i - 1] or "").strip() if i else ""
             prompts.append(tpl.safe_substitute(
-                literal=tt or "(none)", fluent=self._fmt_fluent(whyps)))
+                literal=tt or "(none)", fluent=self._fmt_fluent(whyps),
+                previous=(_context_line(None, prev_raw) if prev_raw
+                          else "(start of the recording)")))
         logger.info("  Fusion 2/2 (server, %d slots): %d segments",
                     self._n_parallel, len(prompts))
         answers = server.generate_batch(
             prompts, max_tokens=self._fusion_max_tokens,
             temperature=self._temperature, top_p=self._top_p)
         for j, ans in zip(idxs, answers):
-            wt = whisper_nbest[j][0] if whisper_nbest[j] else ""
-            think, turns = _parse_fusion(ans)
             # server path has no per-request finish_reason → no truncation
             # signal, but the empty→FLUENT coverage save still applies.
-            self._record_fusion(j, think, turns, {}, wt)
-            bn = (turns[0][1] if turns else "") or wt
-            en = turns[0][2] if turns else ""
-            bn, en = self._apply_ger(j, bn, en, titu_texts[j], whisper_nbest[j])
-            bn_out[j] = bn
-            en_out[j] = en
+            whyps = [h.strip() for h in (whisper_nbest[j] or [])
+                     if h and h.strip()]
+            turns = self._finish_segment(j, ans, {}, ctc_texts[j], whyps)
+            bn_out[j] = " ".join(t[1] for t in turns if t[1])
+            en_out[j] = " ".join(t[2] for t in turns if t[2])
         self._log_ger_summary(n)
         return bn_out, en_out
 
@@ -793,14 +829,15 @@ class FusionTranslator:
             from huggingface_hub import hf_hub_download
             return hf_hub_download(repo_id=self._gguf_repo,
                                    filename=self._gguf_file,
+                                   revision=self._gguf_revision,
                                    local_files_only=True)
         except Exception:
             return None
 
     # ── confidence flag: should a human review this segment? ──────────
     @staticmethod
-    def _review_flag(titu: str, whisper: str, bn: str,
-                     en: str) -> tuple[bool, str]:
+    def _review_flag(literal: str, whisper: str, bn: str, en: str,
+                     unclear_marker: str = "[অস্পষ্ট]") -> tuple[bool, str]:
         """Decide if a segment needs targeted human QA. Reasons:
         - the two witnesses disagree strongly (fusion had to choose)
         - a number is present (numbers are the faithfulness risk)
@@ -808,18 +845,18 @@ class FusionTranslator:
         Returns (needs_review, reason).
 
         Witness disagreement is NOT flagged here — the GER guard does it at
-        grapheme level over the full N-best (Bengali-aware), so flagging it
+        grapheme level over the full N-best (script-aware), so flagging it
         again with char-level difflib here would double-count the same
         finding in the review reason."""
         reasons = []
-        # number present anywhere (Bengali ০-৯ or ASCII digit) → verify
-        if re.search(r"[0-9০-৯]", f"{bn} {en}"):
+        # number present anywhere (digits of any script) → verify
+        if re.search(r"\d", f"{bn} {en}"):
             reasons.append("number")
-        # explicit unclear markers (incl. GER number-abstain [অস্পষ্ট])
-        if "[অস্পষ্ট]" in bn or "[unclear]" in en.lower():
+        # explicit unclear markers (incl. the GER number-abstain marker)
+        if unclear_marker in bn or "[unclear]" in en.lower():
             reasons.append("unclear")
         # empty / near-empty output on non-empty input
-        t, w = (titu or "").strip(), (whisper or "").strip()
+        t, w = (literal or "").strip(), (whisper or "").strip()
         if (t or w) and len(en.strip()) < 3:
             reasons.append("empty-output")
         return (bool(reasons), ", ".join(reasons))
@@ -833,39 +870,47 @@ class FusionTranslator:
         self._fusion_truncated: set[int] = set()  # hit the token cap
         self._fusion_en_empty: set[int] = set()   # bn ok but no English
         self._fusion_tokens: list[int] = []       # output-token sizes
-        # cluster (SPEAKER_xx) → ENUMERATOR/RESPONDENT, decided once per
-        # interview by the LLM classifier (heuristic fallback if it fails).
-        self._cluster_role_map: dict[str, str] = {}
         # GER guard: per-segment reasons, snapped set, and the (min_dist,
         # witness_agree) metrics that calibrate snap_tau.
         self._ger_reasons: dict[int, list] = {}
         self._ger_snapped: set[int] = set()
         self._ger_metrics: dict[int, tuple] = {}
 
-    def _apply_ger(self, i: int, bn: str, en: str, titu: str,
-                   whyps: list[str]) -> tuple[str, str]:
-        """Constrain one fused [bn] against its witness pool: closest-to-
-        N-best snap (when enabled + calibrated), fabricated-number abstain,
-        and agreement/number flags for the review worklist. Records the
-        distance metrics for calibration. No-op when the guard is disabled."""
-        if not self._ger_enabled or not (bn or "").strip():
-            return bn, en
+    def _apply_ger(self, i: int, turns: list[tuple], literal: str,
+                   whyps: list[str]) -> list[tuple]:
+        """Constrain one fused segment against its witness pool: closest-to-
+        N-best snap (when enabled + calibrated), fabricated-number and
+        foreign-script abstain, and agreement flags for the review worklist.
+        The witnesses cover the WHOLE segment, so distances and flags are
+        measured on all turns joined; the abstain rewrites are then applied
+        turn by turn so a question/answer split survives the guard. Records
+        the distance metrics for calibration. No-op when disabled."""
+        bn = " ".join(t[1] for t in turns if t[1])
+        if not self._ger_enabled or not bn.strip():
+            return turns
         from asr_pipeline import ger_guard
+        en = " ".join(t[2] for t in turns if t[2])
         v = ger_guard.assess(
-            bn, en, titu, whyps,
-            snap=self._ger_snap, snap_tau=self._ger_snap_tau)
+            bn, en, literal, whyps,
+            snap=self._ger_snap, snap_tau=self._ger_snap_tau,
+            **self._script_rules)
         # Always record the distance metrics — this is the calibration data
         # for setting snap_tau from the slice's distribution.
         self._ger_metrics[i] = (v.min_dist, v.witness_agree)
         if v.reasons:
             self._ger_reasons[i] = v.reasons
         if v.snapped:
+            # the snapped witness is one undivided reading → one turn
             self._ger_snapped.add(i)
-        # If the guard changed the text (snap or number-abstain), keep the
-        # recorded turn in sync so process() emits the guarded version.
-        if (v.bn, v.en) != (bn, en):
-            self._fusion_turns[i] = [(None, v.bn, v.en)]
-        return v.bn, v.en
+            return [(turns[0][0], v.bn, v.en)]
+        if (v.bn, v.en) == (bn, en):
+            return turns
+        guarded = []
+        for role, tbn, ten in turns:
+            vt = ger_guard.assess(tbn, ten, literal, whyps, snap=False,
+                                  **self._script_rules)
+            guarded.append((role, vt.bn, vt.en))
+        return guarded
 
     def _log_ger_summary(self, n: int) -> None:
         """One-line GER-guard summary for the run (next to fusion coverage).
@@ -955,7 +1000,7 @@ class FusionTranslator:
         if not aligned:
             return []
         self._reset_fusion_stats()
-        titu_texts = [s.raw_text for s in aligned]
+        ctc_texts = [s.raw_text for s in aligned]
         # Whisper N-best: list[list[str]] — up to N candidate readings/seg.
         whisper_nbest = self._run_whisper(aligned, wav_path)
 
@@ -977,24 +1022,26 @@ class FusionTranslator:
                     server.stop()
                     server = None
 
-        # Gemma reconciles titu (phonetic) + Whisper's N-best (fluent
+        # Gemma reconciles the CTC witness (phonetic) + Whisper's N-best (fluent
         # candidates) and translates (one model, fully local).
         if server is not None:
             fused_bn, english = self._run_fusion_server(
-                server, aligned, titu_texts, whisper_nbest)
+                server, aligned, ctc_texts, whisper_nbest)
         else:
             fused_bn, english = self._run_fusion(
-                aligned, titu_texts, whisper_nbest)
+                aligned, ctc_texts, whisper_nbest)
 
-        # One clean ProcessedSegment per fusion segment (fusion only
-        # transcribes/translates now — no roles, no splitting). Roles +
-        # within-segment splitting are done next by the structured role
-        # stage, which has the whole-transcript context. The placeholder
-        # role here is overwritten there.
+        # One ProcessedSegment per role-labelled turn. The fusion call reads
+        # WHAT IS SAID and tags each turn @ENUMERATOR / @RESPONDENT, splitting
+        # a segment that holds both a question and its answer — no voice
+        # clustering. The decision is in the <think> trace (.reasoning.txt).
         if server is not None:
             server.stop()
         processed = []
         sid = 0
+        # An untagged turn (fallback / pass-through) continues the previous
+        # speaker; the interview opens with the enumerator (consent script).
+        last_role = "ENUMERATOR"
         for i, (seg, bn0, en0, whyps) in enumerate(
                 zip(aligned, fused_bn, english, whisper_nbest)):
             wt = whyps[0] if whyps else ""   # top whisper hyp for QA flag
@@ -1006,18 +1053,12 @@ class FusionTranslator:
             fellback = i in self._fusion_fallback
             truncated = i in self._fusion_truncated
             think = self._fusion_think.get(i, "")
-            for k, ((_role, bn, en), (s0, s1)) in enumerate(zip(turns, spans)):
-                # Role = the segment's diarization cluster mapped through the
-                # ONE-TIME LLM cluster→role decision (made above, before the
-                # loop). Segments are speaker-pure (Stage-5 word-level
-                # attribution), so a cluster→role map is all that's needed —
-                # no per-segment guessing, no Q/A alternation, no fabrication.
-                role = self._cluster_role_map.get(seg.speaker_id)
-                if role not in ("ENUMERATOR", "RESPONDENT"):
-                    role = (seg.speaker_id
-                            if seg.speaker_id in ("ENUMERATOR", "RESPONDENT")
-                            else "RESPONDENT")
-                review, reason = self._review_flag(seg.raw_text, wt, bn, en)
+            for k, ((role, bn, en), (s0, s1)) in enumerate(zip(turns, spans)):
+                if role not in _ROLES:
+                    role = last_role
+                last_role = role
+                review, reason = self._review_flag(
+                    seg.raw_text, wt, bn, en, self._profile.unclear_marker)
                 if fellback or truncated:
                     review = True
                     tag = ("fusion-fallback" if fellback
@@ -1039,7 +1080,7 @@ class FusionTranslator:
                     end_s=s1,
                     speaker_id=role,
                     language=seg.language,
-                    # titu raw belongs to the whole segment → show it once,
+                    # the CTC raw text belongs to the whole segment → show it once,
                     # on the first turn only.
                     raw_text=seg.raw_text if k == 0 else "",
                     corrected_text=bn,               # fused Bengali
@@ -1066,14 +1107,11 @@ class FusionTranslator:
         logger.info("  review flags: %d/%d segments need human QA",
                     n_flag, len(processed))
         self._log_fusion_coverage(aligned)
-        # Roles are already set from Stage-5 word-level speaker attribution
-        # (speaker-pure segments + cluster→role mapping). The old per-segment
-        # LLM role-attribution stage has been removed.
         return processed
 
     @staticmethod
     def _free_vram_for_server() -> None:
-        """Release any PyTorch VRAM (titu/Whisper) before the server
+        """Release any PyTorch VRAM (CTC witness/Whisper) before the server
         loads the model, so the GPU is clear for the slots."""
         try:
             import gc
